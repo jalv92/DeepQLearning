@@ -53,7 +53,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             public double StratMLWeight { get; set; } = 0.6;
             public double DeepQWeight { get; set; } = 0.4;
-            public double MinConfidenceThreshold { get; set; } = 0.7;
+            public double MinConfidenceThreshold { get; set; } = 0.6; // Reducido de 0.7 a 0.6
             public bool RequireConsensus { get; set; } = true;
             public TimeSpan SignalValidityWindow { get; set; } = TimeSpan.FromMinutes(5);
             
@@ -154,14 +154,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty]
         [Display(Name = "Cantidad por defecto", Description = "Número de contratos por operación", Order = 1, GroupName = "Gestión de Riesgo")]
         public int DefaultQuantity { get; set; }
-        
-        [NinjaScriptProperty]
-        [Display(Name = "Stop Loss (%)", Description = "Porcentaje para Stop Loss", Order = 2, GroupName = "Gestión de Riesgo")]
-        public double StopLossPercent { get; set; }
-        
-        [NinjaScriptProperty]
-        [Display(Name = "Take Profit (%)", Description = "Porcentaje para Take Profit", Order = 3, GroupName = "Gestión de Riesgo")]
-        public double TakeProfitPercent { get; set; }
         
         [NinjaScriptProperty]
         [Display(Name = "Máx. operaciones diarias", Description = "Límite de operaciones por día", Order = 4, GroupName = "Gestión de Riesgo")]
@@ -300,9 +292,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
         
-        // Método para procesar mensajes recibidos del servidor de señales
+        // Método para procesar mensajes recibidos del servidor de señales con manejo mejorado de errores
         private void ProcessSignalMessage(string message)
         {
+            if (string.IsNullOrEmpty(message))
+            {
+                Print("DataFeeder: Mensaje recibido vacío o nulo, ignorando");
+                return;
+            }
+            
             try
             {
                 // Limpiar el mensaje de caracteres no deseados
@@ -311,55 +309,92 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Formato esperado: Action;Confidence;Timestamp
                 string[] parts = message.Split(';');
                 
-                if (parts.Length >= 2)
+                if (parts == null)
                 {
-                    // Limpiar y validar los valores
-                    string actionStr = parts[0].Trim();
-                    string confidenceStr = parts[1].Trim();
-                    
-                    // Mostrar mensaje de depuración
-                    Print($"DataFeeder: Mensaje recibido: '{message}', Partes: {parts.Length}, Action: '{actionStr}', Confidence: '{confidenceStr}'");
-                    
-                    // Intentar convertir con manejo de errores
-                    if (float.TryParse(actionStr, NumberStyles.Any, CultureInfo.InvariantCulture, out float actionFloat) &&
-                        double.TryParse(confidenceStr, NumberStyles.Any, CultureInfo.InvariantCulture, out double confidence))
+                    Print("DataFeeder: Error al dividir el mensaje en partes, array nulo");
+                    return;
+                }
+                
+                if (parts.Length < 2)
+                {
+                    Print($"DataFeeder: Formato de mensaje incorrecto, partes insuficientes: {parts.Length}");
+                    return;
+                }
+                
+                // Limpiar y validar los valores con verificaciones más estrictas
+                string actionStr = parts[0]?.Trim() ?? "";
+                string confidenceStr = parts[1]?.Trim() ?? "";
+                
+                if (string.IsNullOrEmpty(actionStr) || string.IsNullOrEmpty(confidenceStr))
+                {
+                    Print($"DataFeeder: Valores de acción o confianza vacíos: Action='{actionStr}', Confidence='{confidenceStr}'");
+                    return;
+                }
+                
+                // Mostrar mensaje de depuración
+                Print($"DataFeeder: Mensaje recibido: '{message}', Partes: {parts.Length}, Action: '{actionStr}', Confidence: '{confidenceStr}'");
+                
+                // Intentar convertir con manejo de errores
+                float actionFloat;
+                double confidence;
+                
+                if (!float.TryParse(actionStr, NumberStyles.Any, CultureInfo.InvariantCulture, out actionFloat))
+                {
+                    Print($"DataFeeder: No se pudo convertir la acción a float: '{actionStr}'");
+                    return;
+                }
+                
+                if (!double.TryParse(confidenceStr, NumberStyles.Any, CultureInfo.InvariantCulture, out confidence))
+                {
+                    Print($"DataFeeder: No se pudo convertir la confianza a double: '{confidenceStr}'");
+                    return;
+                }
+                
+                int action = (int)Math.Round(actionFloat);
+                
+                // Validar rango de acción
+                if (action < 0 || action > 2)
+                {
+                    Print($"DataFeeder: Acción fuera de rango: {action}");
+                    return;
+                }
+                
+                Print($"DataFeeder: Señal recibida de DeepQ - Acción: {action}, Confianza: {confidence:P2}");
+                
+                try {
+                    // Añadir al sistema de votación - verificar que el sistema esté inicializado
+                    if (votingSystem != null)
                     {
-                        int action = (int)Math.Round(actionFloat);
-                        
-                        // Validar rango de acción
-                        if (action >= 0 && action <= 2)
-                        {
-                            Print($"DataFeeder: Señal recibida de DeepQ - Acción: {action}, Confianza: {confidence:P2}");
-                            
-                            // Añadir al sistema de votación
-                            votingSystem.AddSignal(action, confidence);
-                            
-                            // Solo evaluar operaciones si la acción no es Hold (0)
-                            // Esto evita evaluar innecesariamente cuando no hay señal de trading
-                            if (action > 0)
-                            {
-                                // Evaluar si debemos ejecutar una operación
-                                EvaluateAndExecuteTrade();
-                            }
-                        }
-                        else
-                        {
-                            Print($"DataFeeder: Acción fuera de rango: {action}");
-                        }
+                        votingSystem.AddSignal(action, confidence);
                     }
                     else
                     {
-                        Print($"DataFeeder: No se pudo convertir los valores: Action='{actionStr}', Confidence='{confidenceStr}'");
+                        Print("DataFeeder: ADVERTENCIA - votingSystem es null, reinicializando");
+                        votingSystem = new VotingSystem();
+                        votingSystem.AddSignal(action, confidence);
+                    }
+                    
+                    // Solo evaluar operaciones si la acción no es Hold (0)
+                    if (action > 0)
+                    {
+                        try {
+                            // Evaluar si debemos ejecutar una operación
+                            EvaluateAndExecuteTrade();
+                        }
+                        catch (Exception evalEx)
+                        {
+                            Print($"DataFeeder: Error al evaluar operación: {evalEx.Message}");
+                        }
                     }
                 }
-                else
+                catch (Exception innerEx)
                 {
-                    Print($"DataFeeder: Formato de mensaje incorrecto, partes: {parts.Length}");
+                    Print($"DataFeeder: Error interno al procesar señal: {innerEx.Message}");
                 }
             }
             catch (Exception ex)
             {
-                Print($"DataFeeder: Error al procesar mensaje de señales: {ex.Message}");
+                Print($"DataFeeder: Error al procesar mensaje de señales: {ex.Message} - Stack: {ex.StackTrace}");
             }
         }
         
@@ -425,82 +460,342 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
         
-        // Variable para almacenar la última orden OCO ID
-        private string lastOcoId = string.Empty;
+        // Variables para gestión de ATM Strategies
+        private List<string> activeAtmStrategies = new List<string>();
+        private string lastOcoId = string.Empty; // Mantener para compatibilidad con métodos existentes
+        private bool orderInProgress = false;
+        private DateTime lastOrderAttemptTime = DateTime.MinValue;
+        private TimeSpan minimumOrderInterval = TimeSpan.FromMinutes(2); // Reducido de 5 a 2 minutos
 
-        // Método para ejecutar operaciones con IDs OCO únicos
+        // Método para ejecutar operaciones utilizando ATM Strategy de NinjaTrader
         private void ExecuteTrade(int action, double confidence)
         {
-            // Calcular niveles de stop loss y take profit en ticks en lugar de porcentaje
-            double currentPrice = Close[0];
-            
-            // Usar ticks para stop loss y take profit (más preciso y menos riesgo)
-            int stopLossTicks = 50;  // Valor predeterminado de 50 ticks
-            int takeProfitTicks = 100; // Valor predeterminado de 100 ticks
-            
-            // Convertir StopLossPercent a ticks (si es muy pequeño, usar mínimo 3 ticks)
-            if (StopLossPercent > 0)
+            // Verificar si ya hay órdenes pendientes o si ha pasado muy poco tiempo desde el último intento
+            if (orderInProgress || HasPendingOrders())
             {
-                double stopLossAmount = currentPrice * (StopLossPercent / 100);
-                stopLossTicks = Math.Max(3, (int)(stopLossAmount / TickSize));
+                Print($"DataFeeder: Ya hay órdenes pendientes, omitiendo nueva operación");
+                return;
             }
-            
-            // Convertir TakeProfitPercent a ticks (si es muy pequeño, usar mínimo 5 ticks)
-            if (TakeProfitPercent > 0)
-            {
-                double takeProfitAmount = currentPrice * (TakeProfitPercent / 100);
-                takeProfitTicks = Math.Max(5, (int)(takeProfitAmount / TickSize));
-            }
-            
-            // Limitar el máximo de ticks para evitar riesgos excesivos
-            stopLossTicks = Math.Min(stopLossTicks, 20);
-            takeProfitTicks = Math.Min(takeProfitTicks, 40);
-            
-            // Calcular precios exactos
-            double stopLoss = action == 1 ? 
-                currentPrice - (stopLossTicks * TickSize) : 
-                currentPrice + (stopLossTicks * TickSize);
-                
-            double takeProfit = action == 1 ? 
-                currentPrice + (takeProfitTicks * TickSize) : 
-                currentPrice - (takeProfitTicks * TickSize);
-            
-            // Generar un ID único para esta operación usando un timestamp y un valor aleatorio
-            string uniqueOcoId = "OCO_" + DateTime.Now.Ticks.ToString() + "_" + new Random().Next(10000, 99999).ToString();
-            lastOcoId = uniqueOcoId; // Almacenar para referencia
 
-            // Cancelar órdenes OCO anteriores si existen
-            CancelOCOOrders();
-            
-            // Ejecutar orden correspondiente con ID OCO único
-            if (action == 1) // Buy
+            // Verificar si ha pasado suficiente tiempo desde el último intento
+            if (DateTime.Now - lastOrderAttemptTime < minimumOrderInterval)
             {
-                if (Position.MarketPosition == MarketPosition.Short)
-                    ExitShort();
-
-                // Generar orden de entrada, stop loss y take profit con OCO ID único
-                EnterLongStopMarket(0, false, DefaultQuantity, currentPrice, uniqueOcoId + "_Entry");
-                ExitLongStopMarket(0, true, DefaultQuantity, stopLoss, uniqueOcoId + "_SL", uniqueOcoId);
-                ExitLongLimit(0, true, DefaultQuantity, takeProfit, uniqueOcoId + "_TP", uniqueOcoId);
-                
-                Print($"DataFeeder: ORDEN LONG ejecutada - Precio: {currentPrice}, SL: {stopLoss} ({stopLossTicks} ticks), TP: {takeProfit} ({takeProfitTicks} ticks), Confianza: {confidence:P2}, OCO ID: {uniqueOcoId}");
+                Print($"DataFeeder: Esperando intervalo mínimo entre operaciones ({minimumOrderInterval.TotalMinutes} minutos)");
+                return;
             }
-            else if (action == 2) // Sell
+            
+            // Marcar que estamos en proceso de orden
+            orderInProgress = true;
+            lastOrderAttemptTime = DateTime.Now;
+            
+            try
             {
-                if (Position.MarketPosition == MarketPosition.Long)
-                    ExitLong();
+                // Obtener precio actual
+                double currentPrice = Close[0];
+                
+                // Usar plantillas ATM preconfiguradas que ya tienen los niveles óptimos de SL/TP
+                Print($"DataFeeder: Utilizando plantilla ATM predefinida para Acción: {action}, Precio actual: {currentPrice}");
+                
+                // Generar IDs únicos para la estrategia ATM
+                string atmStrategyId = GetAtmStrategyUniqueId();
+                string orderId = GetAtmStrategyUniqueId();
+                
+                bool atmCreated = false;
+                
+                // Crear la estrategia ATM según la acción
+                if (action == 1) // Buy
+                {
+                    if (Position.MarketPosition == MarketPosition.Short)
+                        ExitShort();
+                
+                    // Crear estrategia ATM para LONG
+                    // El nombre de la plantilla ATM debe estar creado previamente en NinjaTrader
+                    // Por ejemplo, debe existir una plantilla llamada "ATM-LONG" en NinjaTrader
+                    AtmStrategyCreate(OrderAction.Buy, OrderType.Market, 0, 0, TimeInForce.Day, 
+                                    orderId, "ATM-LONG", atmStrategyId, (errorCode, callbackId) => {
+                        if (errorCode == ErrorCode.NoError && callbackId == atmStrategyId)
+                        {
+                            atmCreated = true;
+                            Print($"DataFeeder: Estrategia ATM LONG creada con éxito");
+                            
+                            // Las plantillas ATM ya tienen configurados los niveles de SL/TP
+                            // No necesitamos modificarlos manualmente
+                            
+                            // Añadir a la lista de estrategias activas
+                            lock (activeAtmStrategies)
+                            {
+                                activeAtmStrategies.Add(atmStrategyId);
+                            }
+                            
+                            // Incrementar contador si la estrategia se creó correctamente
+                            dailyTradeCount++;
+                            lastTradeDate = DateTime.Now;
+                            Print($"DataFeeder: Contador incrementado a {dailyTradeCount}/{MaxDailyTrades}");
+                            Print($"DataFeeder: ORDEN LONG ejecutada con ATM - Precio: {currentPrice}, Confianza: {confidence:P2}");
+                        }
+                        else
+                        {
+                            Print($"DataFeeder: Error al crear estrategia ATM LONG: {errorCode}");
+                        }
+                    });
+                }
+                else if (action == 2) // Sell
+                {
+                    if (Position.MarketPosition == MarketPosition.Long)
+                        ExitLong();
+                
+                    // Crear estrategia ATM para SHORT
+                    // El nombre de la plantilla ATM debe estar creado previamente en NinjaTrader
+                    // Por ejemplo, debe existir una plantilla llamada "ATM-SHORT" en NinjaTrader
+                    AtmStrategyCreate(OrderAction.Sell, OrderType.Market, 0, 0, TimeInForce.Day, 
+                                    orderId, "ATM-SHORT", atmStrategyId, (errorCode, callbackId) => {
+                        if (errorCode == ErrorCode.NoError && callbackId == atmStrategyId)
+                        {
+                            atmCreated = true;
+                            Print($"DataFeeder: Estrategia ATM SHORT creada con éxito");
+                            
+                            // Las plantillas ATM ya tienen configurados los niveles de SL/TP
+                            // No necesitamos modificarlos manualmente
+                            
+                            // Añadir a la lista de estrategias activas
+                            lock (activeAtmStrategies)
+                            {
+                                activeAtmStrategies.Add(atmStrategyId);
+                            }
+                            
+                            // Incrementar contador si la estrategia se creó correctamente
+                            dailyTradeCount++;
+                            lastTradeDate = DateTime.Now;
+                            Print($"DataFeeder: Contador incrementado a {dailyTradeCount}/{MaxDailyTrades}");
+                            Print($"DataFeeder: ORDEN SHORT ejecutada con ATM - Precio: {currentPrice}, Confianza: {confidence:P2}");
+                        }
+                        else
+                        {
+                            Print($"DataFeeder: Error al crear estrategia ATM SHORT: {errorCode}");
+                        }
+                    });
+                }
+            }
+            catch (Exception ex)
+            {
+                Print($"DataFeeder: Error al ejecutar operación con ATM Strategy: {ex.Message}");
+            }
+            finally
+            {
+                // Importante: garantizar que siempre liberamos el flag de operación en proceso
+                orderInProgress = false;
+            }
+        }
+        
+        // Método para monitorear estrategias ATM activas
+        private void MonitorAtmStrategies()
+        {
+            if (activeAtmStrategies.Count == 0)
+                return;
+                
+            List<string> completedStrategies = new List<string>();
+            
+            foreach (string atmStrategyId in activeAtmStrategies)
+            {
+                try
+                {
+                    // Verificar si la estrategia está cerrada (posición flat)
+                    MarketPosition position = GetAtmStrategyMarketPosition(atmStrategyId);
                     
-                // Generar orden de entrada, stop loss y take profit con OCO ID único
-                EnterShortStopMarket(0, false, DefaultQuantity, currentPrice, uniqueOcoId + "_Entry");
-                ExitShortStopMarket(0, true, DefaultQuantity, stopLoss, uniqueOcoId + "_SL", uniqueOcoId);
-                ExitShortLimit(0, true, DefaultQuantity, takeProfit, uniqueOcoId + "_TP", uniqueOcoId);
-                
-                Print($"DataFeeder: ORDEN SHORT ejecutada - Precio: {currentPrice}, SL: {stopLoss} ({stopLossTicks} ticks), TP: {takeProfit} ({takeProfitTicks} ticks), Confianza: {confidence:P2}, OCO ID: {uniqueOcoId}");
+                    if (position == MarketPosition.Flat)
+                    {
+                        Print($"DataFeeder: Estrategia ATM {atmStrategyId} ha sido cerrada");
+                        completedStrategies.Add(atmStrategyId);
+                        continue;
+                    }
+                    
+                    // Solo mostrar información detallada ocasionalmente para evitar spam
+                    if (CurrentBar % 20 == 0)
+                    {
+                        double avgPrice = GetAtmStrategyPositionAveragePrice(atmStrategyId);
+                        int quantity = GetAtmStrategyPositionQuantity(atmStrategyId);
+                        double pnl = GetAtmStrategyUnrealizedProfitLoss(atmStrategyId);
+                        
+                        Print($"DataFeeder: ATM {atmStrategyId} - Posición: {position}, Cantidad: {quantity}, Precio: {avgPrice}, PnL: {pnl}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Print($"DataFeeder: Error al monitorear estrategia ATM {atmStrategyId}: {ex.Message}");
+                    
+                    // Añadir a la lista para eliminar si hay error en el monitoreo
+                    // Esto evita errores continuos por estrategias que ya no existen
+                    completedStrategies.Add(atmStrategyId);
+                }
             }
             
-            // Actualizar contadores
-            dailyTradeCount++;
-            lastTradeDate = DateTime.Now;
+            // Eliminar las estrategias completadas de la lista de activas
+            if (completedStrategies.Count > 0)
+            {
+                lock (activeAtmStrategies)
+                {
+                    foreach (string id in completedStrategies)
+                    {
+                        activeAtmStrategies.Remove(id);
+                    }
+                }
+            }
+        }
+        
+        // Método mejorado para verificar si los SL/TP están correctamente configurados
+        private bool VerifyStopLossAndTakeProfit(double stopLoss, double takeProfit)
+        {
+            try
+            {
+                // Verificar que estemos en una posición
+                if (Position.MarketPosition == MarketPosition.Flat)
+                {
+                    Print("VerifyStopLossAndTakeProfit: No hay posición activa");
+                    return false;
+                }
+
+                // Verificación segura de la colección Orders
+                if (Orders == null)
+                {
+                    Print("VerifyStopLossAndTakeProfit: La colección Orders es null");
+                    return false;
+                }
+                
+                // Verificar si hay órdenes de SL/TP trabajando
+                bool hasStopLoss = false;
+                bool hasTakeProfit = false;
+                
+                // Imprimir información detallada de las órdenes existentes para debug
+                Print($"VerifyStopLossAndTakeProfit: Verificando órdenes para posición {Position.MarketPosition}, buscando SL: {stopLoss}, TP: {takeProfit}");
+                
+                foreach (Order order in Orders)
+                {
+                    if (order == null) 
+                    {
+                        Print("VerifyStopLossAndTakeProfit: Orden null encontrada");
+                        continue;
+                    }
+                    
+                    // Mostrar información detallada de cada orden para depuración
+                    string orderType = "Desconocido";
+                    if (order.OrderType == OrderType.Limit) orderType = "Limit";
+                    else if (order.OrderType == OrderType.Market) orderType = "Market";
+                    else if (order.OrderType == OrderType.StopMarket) orderType = "StopMarket";
+                    else if (order.OrderType == OrderType.StopLimit) orderType = "StopLimit";
+                    
+                    Print($"Orden: ID={order.Id}, Nombre={order.Name}, Tipo={orderType}, Estado={order.OrderState}, " +
+                          $"Acción={order.OrderAction}, LimitPrice={order.LimitPrice}, StopPrice={order.StopPrice}");
+                    
+                    if (order.OrderState != OrderState.Working)
+                    {
+                        Print($"VerifyStopLossAndTakeProfit: Orden {order.Id} ignorada por estado {order.OrderState}");
+                        continue;
+                    }
+                    
+                    // Verificación específica según el tipo de posición
+                    if (Position.MarketPosition == MarketPosition.Long)
+                    {
+                        // Para posición LONG
+                        if (order.OrderAction == OrderAction.Sell && order.OrderType == OrderType.StopMarket &&
+                            order.StopPrice > 0 && Math.Abs(order.StopPrice - stopLoss) < TickSize * 3)
+                        {
+                            hasStopLoss = true;
+                            Print($"VerifyStopLossAndTakeProfit: Stop Loss LONG encontrado: {order.StopPrice}");
+                        }
+                        
+                        if (order.OrderAction == OrderAction.Sell && order.OrderType == OrderType.Limit &&
+                            order.LimitPrice > 0 && Math.Abs(order.LimitPrice - takeProfit) < TickSize * 3)
+                        {
+                            hasTakeProfit = true;
+                            Print($"VerifyStopLossAndTakeProfit: Take Profit LONG encontrado: {order.LimitPrice}");
+                        }
+                    }
+                    else if (Position.MarketPosition == MarketPosition.Short)
+                    {
+                        // Para posición SHORT
+                        if (order.OrderAction == OrderAction.BuyToCover && order.OrderType == OrderType.StopMarket &&
+                            order.StopPrice > 0 && Math.Abs(order.StopPrice - stopLoss) < TickSize * 3)
+                        {
+                            hasStopLoss = true;
+                            Print($"VerifyStopLossAndTakeProfit: Stop Loss SHORT encontrado: {order.StopPrice}");
+                        }
+                        
+                        if (order.OrderAction == OrderAction.BuyToCover && order.OrderType == OrderType.Limit &&
+                            order.LimitPrice > 0 && Math.Abs(order.LimitPrice - takeProfit) < TickSize * 3)
+                        {
+                            hasTakeProfit = true;
+                            Print($"VerifyStopLossAndTakeProfit: Take Profit SHORT encontrado: {order.LimitPrice}");
+                        }
+                    }
+                }
+                
+                // Resultado final - Ambos deben estar configurados
+                bool result = hasStopLoss && hasTakeProfit;
+                Print($"VerifyStopLossAndTakeProfit: Resultado final: hasStopLoss={hasStopLoss}, hasTakeProfit={hasTakeProfit}, resultado={result}");
+                return result;
+            }
+            catch (Exception ex)
+            {
+                Print($"VerifyStopLossAndTakeProfit: Error en la verificación: {ex.Message}");
+                return false;
+            }
+        }
+        
+        // Método para verificar si las órdenes se enviaron correctamente
+        private bool VerifyOrdersSubmitted(string ocoId)
+        {
+            if (Orders == null) return false;
+            
+            // Esperar un breve momento para que las órdenes se procesen
+            System.Threading.Thread.Sleep(100);
+            
+            // Contar órdenes que pertenecen a este grupo OCO
+            int countFound = 0;
+            foreach (Order order in Orders)
+            {
+                if (order != null && 
+                    (order.Name != null && order.Name.Contains(ocoId)) || 
+                    (order.Oco != null && order.Oco.Contains(ocoId)))
+                {
+                    countFound++;
+                }
+            }
+            
+            // Debería haber al menos 2 órdenes (entrada + SL/TP)
+            return countFound >= 2;
+        }
+        
+        // Método para verificar si hay al menos una orden activa
+        private bool HasAtLeastOneActiveOrder()
+        {
+            if (Orders == null) return false;
+            
+            // Esperar un breve momento para verificar
+            System.Threading.Thread.Sleep(100);
+            
+            foreach (Order order in Orders)
+            {
+                if (order != null && order.OrderState == OrderState.Working)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+        
+        // Verificar si hay órdenes pendientes
+        private bool HasPendingOrders()
+        {
+            if (Orders == null) return false;
+            
+            foreach (Order order in Orders)
+            {
+                if (order != null && order.OrderState == OrderState.Working)
+                {
+                    return true;
+                }
+            }
+            return false;
         }
         
         // Método para cancelar órdenes OCO anteriores
@@ -710,11 +1005,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 
                 // Valores por defecto para parámetros
                 DefaultQuantity                             = 1;
-                StopLossPercent                             = 0.2;  // Reducido para menor riesgo
-                TakeProfitPercent                           = 0.5;  // Reducido para menor riesgo
                 MaxDailyTrades                              = 10;
                 RequireConsensus                            = true;
-                MinConfidenceThreshold                      = 0.7;
+                MinConfidenceThreshold                      = 0.6; // Reducido de 0.7 a 0.6 para permitir más operaciones
                 
                 // Inicializar valores
                 dailyTradeCount = 0;
@@ -760,6 +1053,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 			
 			// Enviamos los datos a todos los clientes conectados
 	        SendDataToClients(message);
+            
+            // Monitorear estrategias ATM activas
+            MonitorAtmStrategies();
             
             // Evaluar señales para posibles operaciones
             if (stratIndicator != null)

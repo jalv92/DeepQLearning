@@ -38,283 +38,6 @@ BRIGHT_CYAN = "\033[96m"
 BRIGHT_WHITE = "\033[97m"
 END = "\033[0m"
 
-# Define TradingEnv class compatible with Gym
-class TradingEnv(gym.Env):
-    def __init__(self, feature_dimension):
-        super(TradingEnv, self).__init__()
-        # Define action and observation space
-        self.action_space = spaces.Discrete(3)  # 0: Hold, 1: Buy, 2: Sell
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(feature_dimension,), dtype=np.float32)
-        
-        # Trading state
-        self.current_price = 0
-        self.previous_price = 0
-        self.current_state = None
-        self.position = 0  # 0: no position, 1: long, -1: short
-        
-        # Performance tracking
-        self.cumulative_reward = 0
-        self.trade_count = 0
-        
-    def reset(self, *, seed=None, options=None, initial_state=None):
-        super().reset(seed=seed)
-        if initial_state is not None:
-            self.current_state = initial_state
-        else:
-            self.current_state = np.zeros(self.observation_space.shape)
-        self.position = 0
-        self.cumulative_reward = 0
-        self.trade_count = 0
-        return self.current_state, {}  # Devuelve el estado y un diccionario de información vacío
-        
-    def step(self, action):
-        # Calculate reward based on action and price movement
-        reward = 0
-        done = False
-        truncated = False  # Nuevo parámetro requerido por Gymnasium
-        info = {}
-        
-        # Price increased
-        if self.current_price > self.previous_price:
-            if action == 1:  # Buy/Long
-                reward = 1
-            elif action == 2:  # Sell/Short
-                reward = -1
-        # Price decreased
-        elif self.current_price < self.previous_price:
-            if action == 1:  # Buy/Long
-                reward = -1
-            elif action == 2:  # Sell/Short
-                reward = 1
-        # Price unchanged
-        else:
-            if action == 0:  # Hold
-                reward = 0.1  # Small reward for correctly staying out
-            
-        # Update cumulative metrics
-        self.cumulative_reward += reward
-        if action > 0:
-            self.trade_count += 1
-            
-        # Update position state based on action
-        if action == 1:
-            self.position = 1
-        elif action == 2:
-            self.position = -1
-        else:
-            self.position = 0
-            
-        info = {
-            'cumulative_reward': self.cumulative_reward,
-            'trade_count': self.trade_count,
-            'position': self.position
-        }
-        
-        return self.current_state, reward, done, truncated, info
-    
-    def update_state(self, new_state, current_price, previous_price):
-        self.current_state = new_state
-        self.current_price = current_price
-        self.previous_price = previous_price
-
-# Initialize variables
-default_lag_window_size = 3000
-lag_window_size = default_lag_window_size
-rolling_window_size = lag_window_size + 1000
-min_data = lag_window_size - 1
-retrain_interval = 10  # Entrenar cada 10 iteraciones
-train_counter = 0  # Contador para el entrenamiento
-epsilon = 1.0  # Initial exploration rate
-epsilon_min = 0.1  # Minimum exploration rate
-epsilon_decay = 0.995  # Decay rate for exploration
-batch_size = 64
-
-rolling_data = pd.DataFrame()
-replay_buffer = deque(maxlen=2000)
-action_size = 3  # [Hold, Buy, Sell]
-
-
-# Set up TCP client sockets
-import socket
-
-class TCPClient:
-    def __init__(self, host='localhost', port=5555):
-        self.host = host
-        self.port = port
-        self.sock = None
-        self.buffer = b''
-        self.connected = False
-        
-    def connect(self):
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            self.sock.setblocking(False)
-            self.connected = True
-            print(f"{BRIGHT_GREEN}Conectado al servidor {self.host}:{self.port}{END}")
-            return True
-        except Exception as e:
-            print(f"{RED}Error al conectar con {self.host}:{self.port}: {e}{END}")
-            self.connected = False
-            return False
-            
-    def recv_message(self):
-        if not self.connected:
-            if not self.connect():
-                return None
-        
-        try:
-            data = self.sock.recv(4096)
-            if not data:
-                self.connected = False
-                print(f"{YELLOW}Conexión cerrada por el servidor{END}")
-                return None
-                
-            self.buffer += data
-            
-            # Procesamos mensajes completos terminados en newline o ;
-            messages = []
-            while b'\n' in self.buffer or b';' in self.buffer:
-                newline_pos = self.buffer.find(b'\n')
-                semicolon_pos = self.buffer.find(b';')
-                
-                if newline_pos == -1:
-                    delimiter_pos = semicolon_pos
-                elif semicolon_pos == -1:
-                    delimiter_pos = newline_pos
-                else:
-                    delimiter_pos = min(newline_pos, semicolon_pos)
-                
-                message = self.buffer[:delimiter_pos].decode('utf-8')
-                self.buffer = self.buffer[delimiter_pos+1:]
-                messages.append(message)
-                
-            return messages
-                
-        except BlockingIOError:
-            # No hay datos disponibles
-            return []
-        except Exception as e:
-            print(f"{RED}Error al recibir datos: {e}{END}")
-            self.connected = False
-            return None
-            
-    def send_message(self, message):
-        if not self.connected:
-            if not self.connect():
-                return False
-                
-        try:
-            self.sock.sendall(message.encode('utf-8') + b'\n')
-            return True
-        except Exception as e:
-            print(f"{RED}Error al enviar mensaje: {e}{END}")
-            self.connected = False
-            return False
-            
-    def close(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
-                pass
-            self.sock = None
-        self.connected = False
-
-# Crear conexiones TCP
-data_client = TCPClient(host='localhost', port=5555)
-metrics_client = TCPClient(host='localhost', port=5554)
-
-# Socket para enviar resultados (actuará como servidor)
-class TCPServer:
-    def __init__(self, host='localhost', port=5590):
-        self.host = host
-        self.port = port
-        self.sock = None
-        self.clients = []
-        self.running = False
-        
-    def start(self):
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.sock.bind((self.host, self.port))
-            self.sock.listen(5)
-            self.sock.setblocking(False)
-            self.running = True
-            print(f"{BRIGHT_GREEN}Servidor TCP iniciado en {self.host}:{self.port}{END}")
-            return True
-        except Exception as e:
-            print(f"{RED}Error al iniciar servidor TCP en {self.host}:{self.port}: {e}{END}")
-            self.running = False
-            return False
-            
-    def check_new_clients(self):
-        if not self.running:
-            return
-            
-        try:
-            client, addr = self.sock.accept()
-            client.setblocking(False)
-            self.clients.append(client)
-            print(f"{BRIGHT_GREEN}Nuevo cliente conectado desde {addr}{END}")
-        except BlockingIOError:
-            # No hay nuevas conexiones
-            pass
-        except Exception as e:
-            print(f"{RED}Error al aceptar cliente: {e}{END}")
-            
-    def broadcast(self, message):
-        if not self.running:
-            return
-            
-        disconnected = []
-        for client in self.clients:
-            try:
-                client.sendall(message.encode('utf-8') + b'\n')
-            except:
-                disconnected.append(client)
-                
-        # Eliminar clientes desconectados
-        for client in disconnected:
-            try:
-                client.close()
-            except:
-                pass
-            self.clients.remove(client)
-            
-    def close(self):
-        self.running = False
-        for client in self.clients:
-            try:
-                client.close()
-            except:
-                pass
-        self.clients = []
-        
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
-                pass
-            self.sock = None
-
-# Iniciar servidor para resultados
-results_server = TCPServer(host='localhost', port=5590)
-results_server.start()
-
-version = "1.0.9"  # Versión actualizada según changelog
-credit = f"""{BRIGHT_RED}By HFT ALGO  - Deep Q-Network v{version}{END} {BRIGHT_MAGENTA}  Data: IN/OUT Port: 5554-55 / 5580 {END}"""
-banner = f"""{BRIGHT_MAGENTA}
-██████╗ ███████╗███████╗██████╗      ██████╗ 
-██╔══██╗██╔════╝██╔════╝██╔══██╗    ██╔═══██╗
-██║  ██║█████╗  █████╗  ██████╔╝    ██║   ██║
-██║  ██║██╔══╝  ██╔══╝  ██╔═══╝     ██║▄▄ ██║
-██████╔╝███████╗███████╗██║         ╚██████╔╝
-╚═════╝ ╚══════╝╚══════╝╚═╝          ╚══▀▀═╝ {END}"""
-print(banner)
-print(credit)
-
 # Define TradingEnv class compatible with Gymnasium
 class TradingEnv(gym.Env):
     def __init__(self, feature_dimension):
@@ -354,19 +77,21 @@ class TradingEnv(gym.Env):
         # Price increased
         if self.current_price > self.previous_price:
             if action == 1:  # Buy/Long
-                reward = 1
+                reward = 1.5  # Aumentado de 1 a 1.5
             elif action == 2:  # Sell/Short
-                reward = -1
+                reward = -1.5
         # Price decreased
         elif self.current_price < self.previous_price:
             if action == 1:  # Buy/Long
-                reward = -1
+                reward = -1.5
             elif action == 2:  # Sell/Short
-                reward = 1
+                reward = 1.5  # Aumentado de 1 a 1.5
         # Price unchanged
         else:
             if action == 0:  # Hold
-                reward = 0.1  # Small reward for correctly staying out
+                reward = 0.01  # Reducido de 0.1 a 0.01
+            else:
+                reward = -0.1  # Pequeña penalización por operar cuando no hay cambio
             
         # Update cumulative metrics
         self.cumulative_reward += reward
@@ -580,33 +305,18 @@ class TCPServer:
 results_server = TCPServer(host='localhost', port=5590)
 results_server.start()
 
-# ANSI Color Codes
-BLACK = "\033[30m"
-RED = "\033[31m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-BLUE = "\033[34m"
-MAGENTA = "\033[35m"
-CYAN = "\033[36m"
-WHITE = "\033[37m"
-BRIGHT_BLACK = "\033[90m"
-BRIGHT_RED = "\033[91m"
-BRIGHT_GREEN = "\033[92m"
-BRIGHT_YELLOW = "\033[93m"
-BRIGHT_BLUE = "\033[94m"
-BRIGHT_MAGENTA = "\033[95m"
-BRIGHT_CYAN = "\033[96m"
-BRIGHT_WHITE = "\033[97m"
-END = "\033[0m"
-credit = f"""{BRIGHT_RED}By HFT ALGO  - Deep Q-Network{END} {BRIGHT_MAGENTA}  Data: IN/OUT Port: 5554-55 / 5580 {END}"""
-banner = f"""{BRIGHT_GREEN}
+# Evitar iniciar el servidor dos veces
+server_already_started = True
+
+version = "1.1.14"  # Versión actualizada según changelog
+credit = f"""{BRIGHT_RED}By HFT ALGO  - Deep Q-Network v{version}{END} {BRIGHT_MAGENTA}  Data: IN/OUT Port: 5554-55 / 5580 {END}"""
+banner = f"""{BRIGHT_MAGENTA}
 ██████╗ ███████╗███████╗██████╗      ██████╗ 
 ██╔══██╗██╔════╝██╔════╝██╔══██╗    ██╔═══██╗
 ██║  ██║█████╗  █████╗  ██████╔╝    ██║   ██║
 ██║  ██║██╔══╝  ██╔══╝  ██╔═══╝     ██║▄▄ ██║
 ██████╔╝███████╗███████╗██║         ╚██████╔╝
-╚═════╝ ╚══════╝╚══════╝╚═╝          ╚══▀▀═╝ """
-# Eliminamos la referencia a fade que causa el error
+╚═════╝ ╚══════╝╚══════╝╚═╝          ╚══▀▀═╝ {END}"""
 print(banner)
 print(credit)
 
@@ -716,7 +426,7 @@ def make_env(feature_dim):
 
 async def receive_and_process_data():
     global last_retrain_time, rolling_data, train_counter
-    version = "1.0.1"  # Versión actualizada según changelog
+    version = "1.1.14"  # Versión actualizada según changelog
     loop_counter = 0
     printOnce = False
     scaler = StandardScaler()
@@ -841,13 +551,13 @@ async def receive_and_process_data():
                 # Crear entorno vectorizado
                 vec_env = DummyVecEnv([make_env(feature_dimension)])
                 
-                # Inicializar modelo PPO para trading
+                # Inicializar modelo PPO para trading con mayor exploración
                 model = PPO("MlpPolicy", vec_env, verbose=0, 
                            learning_rate=0.0003, 
                            n_steps=2048,
                            batch_size=64,
                            gamma=0.99,
-                           ent_coef=0.01,  # Fomentar la exploración
+                           ent_coef=0.05,  # Aumentado de 0.01 a 0.05 para mayor exploración
                            clip_range=0.2,
                            n_epochs=10)
                 
