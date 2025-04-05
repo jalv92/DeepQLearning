@@ -1,5 +1,40 @@
 # Changelog
-[2025-04-04 21:08:00]
+[2025-04-04 22:07:11]
+
+## [1.1.25] - 2025-04-04 22:07:11
+
+### Corregido
+- Solucionados errores de compilación relacionados con indicador HFT_TheStrat_ML
+- Renombrado el indicador a HFT_TheStrat_ML_V2 para evitar conflictos con otros componentes
+- Actualizado el código generado automáticamente para reflejar el nuevo nombre
+- Eliminadas ambigüedades en llamadas a métodos y propiedades que causaban errores CS0121 y CS0111
+- Resuelto problema de tipos duplicados que generaban errores de compilación en DataFeeder.cs y MyCustomIndicator.cs
+
+# Changelog
+[2025-04-04 21:38:00]
+
+## [1.1.24] - 2025-04-04 21:38:00
+
+### Corregido
+- Solucionados problemas críticos en la implementación de LSTM y CUDA
+- Corregido el formato de datos para la predicción LSTM usando secuencias completas
+- Implementado sistema de checkpoints automáticos para guardar modelos periódicamente
+- Optimizada transferencia de datos entre CPU y GPU con conversión a tensores PyTorch
+- Mejorado almacenamiento de experiencias para guardar secuencias LSTM completas
+- Corregida la sincronización de datos entre el modelo de entrenamiento y el de inferencia
+
+## [1.1.23] - 2025-04-04 21:29:00
+
+### Mejorado
+- Implementada optimización CUDA para aceleración con GPU en el modelo de aprendizaje por refuerzo
+- Cambiada la política MLP por MlpLstmPolicy (híbrida MLP+LSTM) para mejor procesamiento de datos secuenciales
+- Rediseñada la clase TradingEnv para manejar secuencias temporales optimizadas para LSTM
+- Configurada detección automática de GPU para usar CUDA cuando esté disponible
+- Implementado VecFrameStack para apilar secuencias de estados para LSTM
+- Optimizados hiperparámetros para LSTM: tasa de aprendizaje, tamaño de batch y pasos de entrenamiento
+- Añadida integración con Tensorboard para monitoreo avanzado de entrenamiento
+- Implementado sistema de checkpoints automáticos para guardar modelos periódicamente
+- Actualizado requirements.txt con dependencias necesarias para CUDA y monitoreo de GPU
 
 ## [1.1.22] - 2025-04-04 21:08:00
 

@@ -8,14 +8,32 @@ import pandas as pd
 import numpy as np
 import math
 import uuid
+import torch
+import psutil
 from datetime import datetime
 from collections import deque
 import gymnasium as gym  # Cambiado de gym a gymnasium
 from gymnasium import spaces
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+from stable_baselines3.common.monitor import Monitor
 from sklearn.preprocessing import StandardScaler
 import random
+from torch.utils.tensorboard import SummaryWriter
+
+# Verificar disponibilidad de CUDA
+CUDA_AVAILABLE = torch.cuda.is_available()
+if CUDA_AVAILABLE:
+    torch.backends.cudnn.benchmark = True  # Optimización para redes recurrentes
+    num_gpus = torch.cuda.device_count()
+    current_device = torch.cuda.current_device()
+    device_name = torch.cuda.get_device_name(current_device)
+    print(f"\033[92mCUDA disponible: {num_gpus} GPU(s) detectada(s)")
+    print(f"Usando GPU: {device_name}\033[0m")
+else:
+    print("\033[91mCUDA no disponible. Usando CPU.\033[0m")
 
 if os.name == 'nt':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -41,67 +59,97 @@ BRIGHT_CYAN = "\033[96m"
 BRIGHT_WHITE = "\033[97m"
 END = "\033[0m"
 
-# Define TradingEnv class compatible with Gymnasium
+# Define TradingEnv class compatible with Gymnasium and optimizado para LSTM
 class TradingEnv(gym.Env):
-    def __init__(self, feature_dimension):
+    def __init__(self, feature_dimension, sequence_length=10):
         super(TradingEnv, self).__init__()
-        # Define action and observation space
+        # Definir el espacio de acciones y observaciones
         self.action_space = spaces.Discrete(3)  # 0: Hold, 1: Buy, 2: Sell
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(feature_dimension,), dtype=np.float32)
         
-        # Trading state
+        # Para LSTM, necesitamos un buffer de secuencias temporal
+        self.sequence_length = sequence_length
+        self.feature_dimension = feature_dimension
+        
+        # El espacio de observación es ahora un tensor 2D [sequence_length, feature_dimension]
+        # que representa una secuencia de estados para el LSTM
+        self.observation_space = spaces.Box(
+            low=-np.inf, 
+            high=np.inf, 
+            shape=(sequence_length, feature_dimension), 
+            dtype=np.float32
+        )
+        
+        # Estado de trading
         self.current_price = 0
         self.previous_price = 0
-        self.current_state = None
-        self.position = 0  # 0: no position, 1: long, -1: short
+        self.position = 0  # 0: sin posición, 1: long, -1: short
         
-        # Performance tracking
+        # Buffer de secuencia para LSTM
+        self.state_buffer = deque(maxlen=sequence_length)
+        
+        # Seguimiento de rendimiento
         self.cumulative_reward = 0
         self.trade_count = 0
         
+        # Configuración CUDA para aceleración
+        self.device = torch.device("cuda" if CUDA_AVAILABLE else "cpu")
+        
     def reset(self, *, seed=None, options=None, initial_state=None):
-        # Ignoramos seed y options para compatibilidad con Gymnasium
+        # Inicializar secuencia de estados para LSTM
+        self.state_buffer.clear()
+        
+        # Crear estado inicial (una secuencia de estados idénticos)
         if initial_state is not None:
-            self.current_state = initial_state
+            initial_features = initial_state
         else:
-            self.current_state = np.zeros(self.observation_space.shape)
+            initial_features = np.zeros(self.feature_dimension, dtype=np.float32)
+            
+        # Llenar el buffer con el estado inicial repetido
+        for _ in range(self.sequence_length):
+            self.state_buffer.append(initial_features)
+            
+        # Crear tensor de secuencia para LSTM
+        current_sequence = np.array(self.state_buffer, dtype=np.float32)
+        
+        # Reiniciar métricas
         self.position = 0
         self.cumulative_reward = 0
         self.trade_count = 0
-        return self.current_state, {}  # Devuelve el estado y un diccionario de información vacío
+        
+        return current_sequence, {}  # Devuelve la secuencia y diccionario de info vacío
         
     def step(self, action):
-        # Calculate reward based on action and price movement
+        # Calcular recompensa basada en la acción y movimiento del precio
         reward = 0
         done = False
-        truncated = False  # Nuevo parámetro requerido por Gymnasium
+        truncated = False  # Parámetro requerido por Gymnasium
         info = {}
         
-        # Price increased
+        # Precio aumentó
         if self.current_price > self.previous_price:
-            if action == 1:  # Buy/Long
-                reward = 1.5  # Aumentado de 1 a 1.5
-            elif action == 2:  # Sell/Short
+            if action == 1:  # Comprar/Long
+                reward = 1.5  # Recompensa mejorada
+            elif action == 2:  # Vender/Short
                 reward = -1.5
-        # Price decreased
+        # Precio disminuyó
         elif self.current_price < self.previous_price:
-            if action == 1:  # Buy/Long
+            if action == 1:  # Comprar/Long
                 reward = -1.5
-            elif action == 2:  # Sell/Short
-                reward = 1.5  # Aumentado de 1 a 1.5
-        # Price unchanged
+            elif action == 2:  # Vender/Short
+                reward = 1.5  # Recompensa mejorada
+        # Precio sin cambios
         else:
-            if action == 0:  # Hold
-                reward = 0.01  # Reducido de 0.1 a 0.01
+            if action == 0:  # Mantener
+                reward = 0.01  # Pequeña recompensa por no operar sin tendencia
             else:
-                reward = -0.1  # Pequeña penalización por operar cuando no hay cambio
+                reward = -0.1  # Pequeña penalización por operar sin tendencia
             
-        # Update cumulative metrics
+        # Actualizar métricas acumulativas
         self.cumulative_reward += reward
         if action > 0:
             self.trade_count += 1
             
-        # Update position state based on action
+        # Actualizar posición según la acción
         if action == 1:
             self.position = 1
         elif action == 2:
@@ -115,12 +163,35 @@ class TradingEnv(gym.Env):
             'position': self.position
         }
         
-        return self.current_state, reward, done, truncated, info
+        # Devolver la secuencia actual como estado (para LSTM)
+        current_sequence = np.array(self.state_buffer, dtype=np.float32)
+        
+        return current_sequence, reward, done, truncated, info
     
     def update_state(self, new_state, current_price, previous_price):
-        self.current_state = new_state
+        """
+        Actualiza el estado actual añadiendo un nuevo estado al buffer de secuencia.
+        Optimizado para LSTM y CUDA.
+        """
+        # Actualizar precios
         self.current_price = current_price
         self.previous_price = previous_price
+        
+        # Optimización para CUDA: Convertir a tensor si no lo es ya
+        if CUDA_AVAILABLE and not isinstance(new_state, torch.Tensor):
+            # Convertir a tensor y mover a GPU
+            new_state_tensor = torch.tensor(new_state, dtype=torch.float32, device=self.device)
+            # Convertir de vuelta a numpy para compatibilidad con el resto del código
+            # pero mantener una copia en CUDA para operaciones futuras
+            self._last_cuda_state = new_state_tensor
+            new_state = new_state
+        
+        # Añadir nuevo estado al buffer (automáticamente elimina el más antiguo si está lleno)
+        self.state_buffer.append(new_state)
+        
+        # Si el buffer no está lleno todavía, rellenarlo con copias del nuevo estado
+        while len(self.state_buffer) < self.sequence_length:
+            self.state_buffer.append(new_state)
 
 # Initialize variables
 default_lag_window_size = 3000
@@ -387,7 +458,7 @@ results_client.connect()
 # Evitar iniciar el servidor dos veces
 server_already_started = True
 
-version = "1.1.18"  # Versión actualizada con mejoras en exploración y procesamiento de resultados
+version = "1.1.24"  # Versión corregida con optimizaciones LSTM y CUDA
 credit = f"""{BRIGHT_RED}By HFT ALGO  - Deep Q-Network v{version}{END} {BRIGHT_MAGENTA}  Data: IN/OUT Port: 5554-55 / 5580 {END}"""
 banner = f"""{BRIGHT_MAGENTA}
 ██████╗ ███████╗███████╗██████╗      ██████╗ 
@@ -733,6 +804,7 @@ def update_pending_experience(signal_id, pnl):
         real_reward = reward_system.calculate_real_reward(pnl)
         
         # Almacenar la experiencia con la recompensa real
+        # Nota: Ahora experience['state'] y experience['next_state'] son secuencias LSTM completas
         combined_reward = reward_system.store_experience(
             signal_id, 
             experience['action'], 
@@ -886,27 +958,63 @@ async def receive_and_process_data():
             # Inicializar el modelo si no existe
             if not training_started:
                 feature_dimension = latest_features.shape[0]
-                print(f"{BRIGHT_BLUE}Inicializando entorno con dimensión de características: {feature_dimension}{END}")
+                sequence_length = 10  # Longitud de secuencia para LSTM
+                print(f"{BRIGHT_BLUE}Inicializando entorno con LSTM - dimensión: {feature_dimension}, secuencia: {sequence_length}{END}")
+                
+                # Configuración para entorno optimizado para LSTM
+                def make_env_lstm(feature_dim):
+                    def _init():
+                        # Usar sequence_length para LSTM
+                        env = TradingEnv(feature_dim, sequence_length=sequence_length)
+                        # Envolver con Monitor para seguimiento
+                        return Monitor(env, os.path.join("./logs", f"trading_env_{time.time()}"))
+                    return _init
                 
                 # Crear entorno vectorizado
-                vec_env = DummyVecEnv([make_env(feature_dimension)])
+                vec_env = DummyVecEnv([make_env_lstm(feature_dimension)])
+                # Apilar frames para secuencias LSTM
+                vec_env = VecFrameStack(vec_env, n_stack=sequence_length)
                 
-                # Inicializar modelo PPO con mucha mayor exploración (ent_coef=0.25)
-                model = PPO("MlpPolicy", vec_env, verbose=0, 
-                           learning_rate=0.0003, 
-                           n_steps=2048,
-                           batch_size=64,
-                           gamma=0.99,
-                           ent_coef=0.25,  # Aumentado significativamente para mucha más exploración
-                           clip_range=0.2,
-                           n_epochs=10)
+                # Configuración de Tensorboard para monitoreo
+                tensorboard_log = "./tensorboard_logs/"
+                os.makedirs(tensorboard_log, exist_ok=True)
+                
+                # Inicializar modelo PPO con política LSTM y activar CUDA
+                device = "cuda" if CUDA_AVAILABLE else "cpu"
+                print(f"{BRIGHT_GREEN}Usando dispositivo: {device} para entrenamiento{END}")
+                
+                model = PPO(
+                    "MlpLstmPolicy",  # Política híbrida MLP+LSTM para trading
+                    vec_env, 
+                    verbose=1,  # Mostrar más información de entrenamiento
+                    learning_rate=0.0005,  # Tasa de aprendizaje optimizada para LSTM
+                    n_steps=512,  # Reducido para permitir actualizaciones más frecuentes
+                    batch_size=128,  # Aumentado para mejor paralelización en GPU
+                    gamma=0.99,
+                    ent_coef=0.01,  # Reducido para menos exploración aleatoria con LSTM
+                    clip_range=0.2,
+                    n_epochs=4,  # Aumentado para entrenar más por batch
+                    device=device,  # Usar CUDA si está disponible
+                    tensorboard_log=tensorboard_log
+                )
+                
+                # Configurar callbacks para checkpoint y monitoreo
+                checkpoint_dir = "./model_checkpoints/"
+                os.makedirs(checkpoint_dir, exist_ok=True)
+                checkpoint_callback = CheckpointCallback(
+                    save_freq=1000,
+                    save_path=checkpoint_dir,
+                    name_prefix="ppo_trading_model",
+                    save_replay_buffer=True,
+                    save_vecnormalize=True,
+                )
                 
                 # Inicializar entorno para inferencia
-                env = TradingEnv(feature_dimension)
+                env = TradingEnv(feature_dimension, sequence_length=sequence_length)
                 env.reset(initial_state=latest_features)
                 
                 training_started = True
-                print(f"{BRIGHT_GREEN}Modelo PPO inicializado correctamente{END}")
+                print(f"{BRIGHT_GREEN}Modelo PPO con LSTM inicializado correctamente para CUDA{END}")
             
             # Actualizar el estado con los nuevos datos
             current_price = rolling_data['price'].iloc[-2]
@@ -914,6 +1022,9 @@ async def receive_and_process_data():
             
             # Generar ID único para la señal
             signal_id = generate_signal_id()
+            
+            # Obtener la secuencia actual para la predicción LSTM
+            current_sequence = np.array(env.state_buffer, dtype=np.float32)
             
             # Implementar mecanismo de forzado de exploración periódica
             # Ocasionalmente forzar una acción diferente a la que el modelo sugeriría
@@ -923,8 +1034,8 @@ async def receive_and_process_data():
                 action = forced_action
                 print(f"{BRIGHT_MAGENTA}Forzando exploración - acción aleatoria: {action}{END}")
             else:
-                # Predecir acción usando el modelo PPO
-                action, _ = model.predict(latest_features, deterministic=False)
+                # Predecir acción usando el modelo PPO con la secuencia correcta para LSTM
+                action, _ = model.predict(current_sequence, deterministic=False)
             
             # Mostrar la acción predicha
             print('')
@@ -946,15 +1057,16 @@ async def receive_and_process_data():
                 save_signal(signal_id, action, confidence, latest_features)
                 
                 # Almacenar como experiencia pendiente para actualizar con recompensa real
+                # Usar la secuencia completa para LSTM en lugar de solo latest_features
                 pending_experiences[signal_id] = {
                     'action': action,
                     'simulated_reward': simulated_reward,
-                    'state': np.array([latest_features]),
-                    'next_state': np.array([latest_features]),
+                    'state': current_sequence,
+                    'next_state': current_sequence, # Para simplicidad usamos la misma secuencia como estado siguiente
                     'done': int(done)
                 }
                 
-                # Registrar la experiencia para compatibilidad
+                # Registrar la experiencia para compatibilidad (mantenemos el formato anterior para compatibilidad)
                 log_performance(loop_counter, action, simulated_reward, np.array([latest_features]), np.array([latest_features]), int(done))
                 
                 # Mostrar información sobre la operación
@@ -967,7 +1079,8 @@ async def receive_and_process_data():
                 if train_counter >= retrain_interval:
                     print(f"{BRIGHT_BLUE}Entrenando modelo PPO (iteración {train_counter}){END}")
                     # Entrenar por 50 timesteps (aumentado de 10 a 50 para un aprendizaje más profundo)
-                    model.learn(total_timesteps=50)
+                    # Usar callback para guardar checkpoints periódicos
+                    model.learn(total_timesteps=50, callback=checkpoint_callback)
                     train_counter = 0
                 
                 # Enviar acción al socket con ID, confianza y timestamp

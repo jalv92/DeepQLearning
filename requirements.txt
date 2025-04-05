@@ -4,6 +4,13 @@ numpy>=1.20.0
 gymnasium>=0.27.0
 stable-baselines3>=2.0.0
 scikit-learn>=1.0.0
+torch>=2.0.0  # PyTorch con soporte CUDA
+cupy-cuda11x>=11.0.0  # CuPy para NumPy acelerado (ajusta versión según tu CUDA)
+tensorboard>=2.11.0  # Para monitoreo de rendimiento
+
+# Dependencias para optimización GPU
+nvidia-ml-py3>=7.352.0  # Para monitoreo de GPU
+psutil>=5.9.0  # Para monitoreo de sistema
 
 # Dependencias para visualización (opcionales pero recomendadas)
 matplotlib>=3.4.0

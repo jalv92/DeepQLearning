@@ -23,7 +23,7 @@ using NinjaTrader.NinjaScript.DrawingTools;
  
 namespace NinjaTrader.NinjaScript.Indicators
 {
-	public class HFT_TheStrat_ML : Indicator
+public class HFT_TheStrat_ML_V2 : Indicator
 	{
 		NinjaTrader.Gui.Tools.SimpleFont title = 
 		new NinjaTrader.Gui.Tools.SimpleFont("Agency Fb", 16) { Size = 20, Bold = true };
@@ -60,7 +60,7 @@ namespace NinjaTrader.NinjaScript.Indicators
 			if (State == State.SetDefaults)
 			{
 				Description									= @"Enter the description for your new custom Indicator here.";
-				Name										= "HFT_TheStrat_ML";
+				Name										= "HFT_TheStrat_ML_V2";
 				Calculate									= Calculate.OnBarClose;
 				IsOverlay									= true;
 				DisplayInDataBox							= true;
@@ -280,19 +280,19 @@ namespace NinjaTrader.NinjaScript.Indicators
 {
 	public partial class Indicator : NinjaTrader.Gui.NinjaScript.IndicatorRenderBase
 	{
-		private HFT_TheStrat_ML[] cacheHFT_TheStrat_ML;
-		public HFT_TheStrat_ML HFT_TheStrat_ML()
+		private HFT_TheStrat_ML_V2[] cacheHFT_TheStrat_ML_V2;
+		public HFT_TheStrat_ML_V2 HFT_TheStrat_ML_V2()
 		{
-			return HFT_TheStrat_ML(Input);
+			return HFT_TheStrat_ML_V2(Input);
 		}
 
-		public HFT_TheStrat_ML HFT_TheStrat_ML(ISeries<double> input)
+		public HFT_TheStrat_ML_V2 HFT_TheStrat_ML_V2(ISeries<double> input)
 		{
-			if (cacheHFT_TheStrat_ML != null)
-				for (int idx = 0; idx < cacheHFT_TheStrat_ML.Length; idx++)
-					if (cacheHFT_TheStrat_ML[idx] != null &&  cacheHFT_TheStrat_ML[idx].EqualsInput(input))
-						return cacheHFT_TheStrat_ML[idx];
-			return CacheIndicator<HFT_TheStrat_ML>(new HFT_TheStrat_ML(), input, ref cacheHFT_TheStrat_ML);
+			if (cacheHFT_TheStrat_ML_V2 != null)
+				for (int idx = 0; idx < cacheHFT_TheStrat_ML_V2.Length; idx++)
+					if (cacheHFT_TheStrat_ML_V2[idx] != null &&  cacheHFT_TheStrat_ML_V2[idx].EqualsInput(input))
+						return cacheHFT_TheStrat_ML_V2[idx];
+			return CacheIndicator<HFT_TheStrat_ML_V2>(new HFT_TheStrat_ML_V2(), input, ref cacheHFT_TheStrat_ML_V2);
 		}
 	}
 }
@@ -301,14 +301,14 @@ namespace NinjaTrader.NinjaScript.MarketAnalyzerColumns
 {
 	public partial class MarketAnalyzerColumn : MarketAnalyzerColumnBase
 	{
-		public Indicators.HFT_TheStrat_ML HFT_TheStrat_ML()
+		public Indicators.HFT_TheStrat_ML_V2 HFT_TheStrat_ML_V2()
 		{
-			return indicator.HFT_TheStrat_ML(Input);
+			return indicator.HFT_TheStrat_ML_V2(Input);
 		}
 
-		public Indicators.HFT_TheStrat_ML HFT_TheStrat_ML(ISeries<double> input )
+		public Indicators.HFT_TheStrat_ML_V2 HFT_TheStrat_ML_V2(ISeries<double> input )
 		{
-			return indicator.HFT_TheStrat_ML(input);
+			return indicator.HFT_TheStrat_ML_V2(input);
 		}
 	}
 }
@@ -317,14 +317,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
 	public partial class Strategy : NinjaTrader.Gui.NinjaScript.StrategyRenderBase
 	{
-		public Indicators.HFT_TheStrat_ML HFT_TheStrat_ML()
+		public Indicators.HFT_TheStrat_ML_V2 HFT_TheStrat_ML_V2()
 		{
-			return indicator.HFT_TheStrat_ML(Input);
+			return indicator.HFT_TheStrat_ML_V2(Input);
 		}
 
-		public Indicators.HFT_TheStrat_ML HFT_TheStrat_ML(ISeries<double> input )
+		public Indicators.HFT_TheStrat_ML_V2 HFT_TheStrat_ML_V2(ISeries<double> input )
 		{
-			return indicator.HFT_TheStrat_ML(input);
+			return indicator.HFT_TheStrat_ML_V2(input);
 		}
 	}
 }
