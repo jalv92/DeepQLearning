@@ -186,7 +186,7 @@ class Config:
     RESULTS_PORT = 5591
     
     # Versión del software
-    VERSION = "1.1.36"  # Versión actualizada con limpieza de proyecto
+    VERSION = "1.1.35"  # Versión actualizada con limpieza de proyecto
     
     # Modos de operación
     MODE_NORMAL = 0      # Modo normal, con conexión a todos los servicios
@@ -1031,7 +1031,7 @@ async def receive_and_process_data():
                     n_steps=128,
                     batch_size=64,
                     gamma=0.97,  # Reducido de 0.99 a 0.97
-                    ent_coef=0.35,  # Valor fijo de entropía: 0.35
+                    ent_coef=0.25,  # Valor fijo de entropía: 0.25
                     clip_range=0.2,
                     n_epochs=5,  # Aumentado de 4 a 5
                     device=device,
@@ -1072,7 +1072,7 @@ async def receive_and_process_data():
             
             # Implementar mecanismo de forzado de exploración periódica
             # Ocasionalmente forzar una acción diferente a la que el modelo sugeriría
-            if random.random() < 0.25:  # 25% de las veces
+            if random.random() < 0.15:  # 15% de las veces
                 # Seleccionar una acción aleatoria (todas tienen igual probabilidad)
                 forced_action = random.randint(0, 2)
                 action = forced_action

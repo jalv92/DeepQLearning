@@ -1,0 +1,14 @@
+{
+    "total_signals": 3258,
+    "action_distribution": {
+        "0": 53.1,
+        "1": 22.93,
+        "2": 23.97
+    },
+    "total_experiences": 50,
+    "reward_stats": {
+        "mean": -0.1469915813440901,
+        "max": 1.9767427198085763,
+        "min": -1.798513918925795
+    }
+}

@@ -124,7 +124,7 @@ public class DataFeeder : Strategy
         {
             public double StratMLWeight { get; set; } = 0.6;
             public double DeepQWeight { get; set; } = 0.4;
-            public double MinConfidenceThreshold { get; set; } = 0.45; // Reducido de 0.7 a 0.6
+            public double MinConfidenceThreshold { get; set; } = 0.6; // Reducido de 0.7 a 0.6
             public bool RequireConsensus { get; set; } = true;
             public TimeSpan SignalValidityWindow { get; set; } = TimeSpan.FromMinutes(5);
             
@@ -1523,7 +1523,7 @@ public class DataFeeder : Strategy
                 DefaultQuantity                             = 1;
                 MaxDailyTrades                              = 10;
                 RequireConsensus                            = true;
-                MinConfidenceThreshold                      = 0.45; // Reducido de 0.7 a 0.6 para permitir más operaciones
+                MinConfidenceThreshold                      = 0.6; // Reducido de 0.7 a 0.6 para permitir más operaciones
                 
                 // Inicializar valores
                 dailyTradeCount = 0;
