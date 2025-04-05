@@ -1,5 +1,84 @@
 # Changelog
-[2025-04-04 15:28:00]
+[2025-04-04 19:47:00]
+
+## [1.1.21] - 2025-04-04 19:47:00
+
+### Corregido
+- Solucionado definitivamente el error de compilación CS1524 en DataFeeder.cs
+- Reestructurado completamente el método ProcessSignalMessage() para eliminar try-catch anidados
+- Eliminado bloque catch duplicado que causaba error CS0160
+- Reorganizado el código para mayor claridad y mantenibilidad
+
+## [1.1.20] - 2025-04-04 19:42:00
+
+### Corregido
+- Solucionado error de compilación CS1524 y CS0160 en DataFeeder.cs
+- Reestructurado el método ProcessSignalMessage para eliminar try-catch anidados duplicados
+- Corregido problema de bloques catch duplicados que capturaban el mismo tipo de excepción
+- Reorganizado el código para mantener la estructura de control de flujo correcta
+
+## [1.1.19] - 2025-04-04 19:40:00
+
+### Corregido
+- Solucionado error de compilación CS1524 "Expected catch or finally" en DataFeeder.cs
+- Añadido bloque catch faltante en el método ProcessSignalMessage para un bloque try anidado
+- Mejorado el manejo de errores en el procesamiento de señales para mayor robustez
+
+## [1.1.18] - 2025-04-04 18:52:15
+
+### Mejorado
+- Optimizado significativamente el balance exploración-explotación en el modelo de aprendizaje por refuerzo
+- Aumentado el coeficiente de entropía (ent_coef) de 0.05 a 0.25 para fomentar exploración mucho más agresiva
+- Implementado mecanismo de forzado de exploración periódica que selecciona acciones aleatorias en el 15% de las decisiones
+- Aumentada la cantidad de entrenamiento por ciclo de 10 a 50 timesteps para un aprendizaje más profundo
+- Mejorado el procesamiento de mensajes de resultado de operaciones con manejo de errores extenso y detallado
+- Implementado soporte para distintos formatos de fecha/hora en los mensajes de resultado para mayor robustez
+- Añadido logging detallado en el procesamiento de operaciones para facilitar la depuración
+
+### Corregido
+- Solucionado problema donde el formato incorrecto de mensajes impedía la comunicación bidireccional
+- Mejorada la validación de formato de mensajes en DataFeeder.cs con comprobaciones exhaustivas
+- Corregido manejo de strings en Operation.ToResultMessage para asegurar formato consistente en fechas y valores numéricos
+- Resuelto problema de interpretación incorrecta de los campos de señal en DataFeeder.cs
+
+## [1.1.17] - 2025-04-04 17:02:00
+
+### Corregido
+- Solucionado problema crítico de comunicación entre DeepQ.py y DataFeeder.cs
+- Mejorado el procesamiento de mensajes en DataFeeder.cs con validación de formato más robusta
+- Corregida la interpretación del formato de mensajes para identificar correctamente el SignalId
+- Añadidos logs detallados en DeepQ.py para verificar el envío de señales
+- Implementada verificación de formato UUID para SignalId en DataFeeder.cs
+
+## [1.1.16] - 2025-04-04 16:39:00
+
+### Optimizado
+- Completado el archivo DeepQ.py con todas las funcionalidades necesarias para el sistema de retroalimentación
+- Mejorada la función receive_and_process_data para manejar resultados de operaciones
+- Reforzado el sistema de procesamiento de resultados con mejor manejo de errores
+- Perfeccionado el sistema de actualización de experiencias pendientes con recompensas reales
+
+## [1.1.15] - 2025-04-04 16:03:00
+
+### Añadido
+- Implementado sistema completo de retroalimentación para aprendizaje por refuerzo en trading
+- Creado servidor TCP en puerto 5591 en DataFeeder.cs para enviar resultados de operaciones
+- Añadido seguimiento detallado de operaciones con IDs únicos para señales y operaciones
+- Implementado cliente TCP en DeepQ.py para recibir resultados de operaciones
+- Ampliado el esquema de la base de datos SQLite con nuevas tablas:
+  - Tabla 'signals' para almacenar señales emitidas
+  - Tabla 'operation_results' para guardar resultados reales de operaciones
+  - Tabla 'real_experiences' para experiencias con recompensas híbridas
+- Desarrollado sistema de recompensas híbrido que combina simuladas y reales
+- Añadido mecanismo de ponderación adaptativa que da más peso a recompensas reales con el tiempo
+- Implementado sistema de experiencias pendientes mientras se esperan resultados reales
+- Creada función sigmoide para normalizar P&L a recompensas en rango [-1, 1]
+
+### Cambiado
+- Requerido formato de mensajes para incluir SignalId como identificador único
+- Modificado el flujo de trabajo del agente para gestionar recompensas diferidas
+- Reestructurado el proceso de entrenamiento para incluir experiencias reales
+- Actualizada la versión del software a 1.1.15
 
 ## [1.1.14] - 2025-04-04 15:28:00
 

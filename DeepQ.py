@@ -6,6 +6,9 @@ import socket
 import sqlite3
 import pandas as pd
 import numpy as np
+import math
+import uuid
+from datetime import datetime
 from collections import deque
 import gymnasium as gym  # Cambiado de gym a gymnasium
 from gymnasium import spaces
@@ -301,14 +304,90 @@ class TCPServer:
                 pass
             self.sock = None
 
-# Iniciar servidor para resultados
+# Cliente TCP para recibir resultados de operaciones
+class TCPResultsClient:
+    def __init__(self, host='localhost', port=5591):
+        self.host = host
+        self.port = port
+        self.sock = None
+        self.buffer = b''
+        self.connected = False
+        
+    def connect(self):
+        try:
+            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.sock.connect((self.host, self.port))
+            self.sock.setblocking(False)
+            self.connected = True
+            print(f"{BRIGHT_GREEN}Conectado al servidor de resultados {self.host}:{self.port}{END}")
+            return True
+        except Exception as e:
+            print(f"{RED}Error al conectar con servidor de resultados {self.host}:{self.port}: {e}{END}")
+            self.connected = False
+            return False
+            
+    def recv_message(self):
+        if not self.connected:
+            if not self.connect():
+                return None
+        
+        try:
+            data = self.sock.recv(4096)
+            if not data:
+                self.connected = False
+                print(f"{YELLOW}Conexión cerrada por el servidor de resultados{END}")
+                return None
+                
+            self.buffer += data
+            
+            # Procesamos mensajes completos terminados en newline o ;
+            messages = []
+            while b'\n' in self.buffer or b';' in self.buffer:
+                newline_pos = self.buffer.find(b'\n')
+                semicolon_pos = self.buffer.find(b';')
+                
+                if newline_pos == -1:
+                    delimiter_pos = semicolon_pos
+                elif semicolon_pos == -1:
+                    delimiter_pos = newline_pos
+                else:
+                    delimiter_pos = min(newline_pos, semicolon_pos)
+                
+                message = self.buffer[:delimiter_pos].decode('utf-8')
+                self.buffer = self.buffer[delimiter_pos+1:]
+                messages.append(message)
+                
+            return messages
+                
+        except BlockingIOError:
+            # No hay datos disponibles
+            return []
+        except Exception as e:
+            print(f"{RED}Error al recibir datos de resultados: {e}{END}")
+            self.connected = False
+            return None
+            
+    def close(self):
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
+            self.sock = None
+        self.connected = False
+
+# Iniciar servidor de señales
 results_server = TCPServer(host='localhost', port=5590)
 results_server.start()
+
+# Iniciar cliente de resultados
+results_client = TCPResultsClient(host='localhost', port=5591)
+results_client.connect()
 
 # Evitar iniciar el servidor dos veces
 server_already_started = True
 
-version = "1.1.14"  # Versión actualizada según changelog
+version = "1.1.18"  # Versión actualizada con mejoras en exploración y procesamiento de resultados
 credit = f"""{BRIGHT_RED}By HFT ALGO  - Deep Q-Network v{version}{END} {BRIGHT_MAGENTA}  Data: IN/OUT Port: 5554-55 / 5580 {END}"""
 banner = f"""{BRIGHT_MAGENTA}
 ██████╗ ███████╗███████╗██████╗      ██████╗ 
@@ -330,10 +409,12 @@ update_target_interval = 1
 # Set up database for storing performance data
 db_path = 'dqn_learning.db'
 
-# Create a table to store model performance if it doesn't exist
+# Create extended database schema with tables for signals, operation results, and experiences
 def setup_database():
     with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
+        
+        # Original table for model performance (kept for compatibility)
         c.execute('''
         CREATE TABLE IF NOT EXISTS model_performance (
             run_id INTEGER,
@@ -345,9 +426,97 @@ def setup_database():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        
+        # Table for emitted signals
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS signals (
+            signal_id TEXT PRIMARY KEY,
+            timestamp DATETIME,
+            action INTEGER,
+            confidence REAL,
+            features TEXT
+        )
+        ''')
+        
+        # Table for operation results
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS operation_results (
+            operation_id TEXT PRIMARY KEY,
+            signal_id TEXT,
+            entry_time DATETIME,
+            entry_price REAL,
+            direction INTEGER,
+            exit_time DATETIME,
+            exit_price REAL,
+            pnl REAL,
+            close_reason TEXT,
+            FOREIGN KEY (signal_id) REFERENCES signals(signal_id)
+        )
+        ''')
+        
+        # Table for modified experiences with real rewards
+        c.execute('''
+        CREATE TABLE IF NOT EXISTS real_experiences (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            signal_id TEXT,
+            action INTEGER,
+            simulated_reward REAL,
+            real_reward REAL,
+            combined_reward REAL,
+            state TEXT,
+            next_state TEXT,
+            done INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (signal_id) REFERENCES signals(signal_id)
+        )
+        ''')
+        
         conn.commit()
 
 setup_database()
+
+# Sistema de recompensas híbrido
+class RewardSystem:
+    def __init__(self, initial_alpha=0.7, decay_factor=0.995, min_alpha=0.3):
+        self.alpha = initial_alpha  # Factor de ponderación para recompensas simuladas
+        self.decay_factor = decay_factor  # Factor de decaimiento de alpha
+        self.min_alpha = min_alpha  # Valor mínimo de alpha
+        
+    def decay_alpha(self):
+        # Disminuir alpha gradualmente para dar más peso a las recompensas reales con el tiempo
+        self.alpha = max(self.min_alpha, self.alpha * self.decay_factor)
+        
+    def calculate_real_reward(self, pnl, risk_amount=100):
+        # Normaliza el P&L basado en la cantidad de riesgo
+        normalized_pnl = pnl / risk_amount
+        # Función sigmoide para mantener valores en rango razonable [-1, 1]
+        real_reward = 2 / (1 + math.exp(-normalized_pnl)) - 1
+        return real_reward
+        
+    def calculate_combined_reward(self, simulated_reward, real_reward):
+        # Combinar recompensas simuladas y reales según el factor alpha
+        return (self.alpha * simulated_reward) + ((1 - self.alpha) * real_reward)
+        
+    def store_experience(self, signal_id, action, simulated_reward, real_reward, state, next_state, done=0):
+        combined_reward = self.calculate_combined_reward(simulated_reward, real_reward)
+        
+        with sqlite3.connect(db_path) as conn:
+            c = conn.cursor()
+            c.execute('''
+            INSERT INTO real_experiences 
+            (signal_id, action, simulated_reward, real_reward, combined_reward, state, next_state, done)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (signal_id, action, simulated_reward, real_reward, combined_reward, 
+                 str(state.tolist()), str(next_state.tolist()), done))
+            conn.commit()
+        
+        return combined_reward
+
+# Diccionario para almacenar las experiencias pendientes
+pending_experiences = {}
+
+# Instanciar el sistema de recompensas
+reward_system = RewardSystem()
 
 def log_performance(run_id, action, reward, state, next_state, done):
     action_int = int(action)  # Convert numpy.int64 to standard int
@@ -424,9 +593,169 @@ def make_env(feature_dim):
         return env
     return _init
 
+# Función para generar un ID único para señales
+def generate_signal_id():
+    return str(uuid.uuid4())
+
+# Función para guardar una señal emitida en la base de datos
+def save_signal(signal_id, action, confidence, features):
+    with sqlite3.connect(db_path) as conn:
+        c = conn.cursor()
+        c.execute('''
+        INSERT INTO signals (signal_id, timestamp, action, confidence, features)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (signal_id, datetime.now(), int(action), float(confidence), str(features.tolist())))
+        conn.commit()
+
+# Función para procesar los resultados de operaciones recibidos
+def process_operation_result(result_message):
+    """
+    Procesa un mensaje de resultado de operación.
+    Formato esperado: operationId;signalId;entryTime;entryPrice;direction;exitTime;exitPrice;pnl;closeReason
+    """
+    print(f"{BRIGHT_CYAN}Procesando mensaje de resultado: {result_message}{END}")
+    
+    # Primero verificamos si el mensaje tiene contenido válido
+    if not result_message or len(result_message.strip()) == 0:
+        print(f"{RED}Mensaje de resultado vacío{END}")
+        return None
+    
+    # Eliminamos espacios y caracteres de control
+    result_message = result_message.strip()
+    
+    # Dividimos el mensaje en sus componentes
+    parts = result_message.split(';')
+    
+    # Verificamos que tengamos todas las partes necesarias
+    if len(parts) < 9:
+        print(f"{RED}Mensaje de resultado incompleto ({len(parts)} partes): {result_message}{END}")
+        # Intentamos mostrar las partes que sí tenemos para diagnóstico
+        for i, part in enumerate(parts):
+            print(f"{RED}  Parte {i}: {part}{END}")
+        return None
+    
+    try:
+        # Extraemos cada componente con manejo de errores detallado
+        operation_id = parts[0].strip()
+        signal_id = parts[1].strip()
+        
+        # Validamos que los IDs sean UUIDs
+        try:
+            if not all(x.isalnum() or x == '-' for x in operation_id) or not all(x.isalnum() or x == '-' for x in signal_id):
+                print(f"{YELLOW}Advertencia: IDs posiblemente no válidos: op={operation_id}, signal={signal_id}{END}")
+        except Exception as id_ex:
+            print(f"{YELLOW}Error al validar IDs: {id_ex}{END}")
+        
+        # Procesamos las fechas
+        try:
+            entry_time = datetime.strptime(parts[2].strip(), '%Y-%m-%d %H:%M:%S.%f')
+        except ValueError:
+            # Intentamos formato alternativo
+            try:
+                entry_time = datetime.strptime(parts[2].strip(), '%Y-%m-%d %H:%M:%S')
+            except ValueError as e:
+                print(f"{RED}Error al analizar entry_time: {parts[2]} - {e}{END}")
+                entry_time = datetime.now()  # Valor predeterminado
+        
+        # Procesamos valores numéricos con manejo de errores extenso
+        try:
+            entry_price = float(parts[3].strip())
+        except ValueError as e:
+            print(f"{RED}Error al convertir entry_price a float: {parts[3]} - {e}{END}")
+            entry_price = 0.0
+        
+        try:
+            direction = int(parts[4].strip())
+        except ValueError as e:
+            print(f"{RED}Error al convertir direction a int: {parts[4]} - {e}{END}")
+            direction = 0
+        
+        try:
+            exit_time = datetime.strptime(parts[5].strip(), '%Y-%m-%d %H:%M:%S.%f')
+        except ValueError:
+            try:
+                exit_time = datetime.strptime(parts[5].strip(), '%Y-%m-%d %H:%M:%S')
+            except ValueError as e:
+                print(f"{RED}Error al analizar exit_time: {parts[5]} - {e}{END}")
+                exit_time = datetime.now()
+        
+        try:
+            exit_price = float(parts[6].strip())
+        except ValueError as e:
+            print(f"{RED}Error al convertir exit_price a float: {parts[6]} - {e}{END}")
+            exit_price = 0.0
+        
+        try:
+            pnl = float(parts[7].strip())
+        except ValueError as e:
+            print(f"{RED}Error al convertir pnl a float: {parts[7]} - {e}{END}")
+            pnl = 0.0
+        
+        close_reason = parts[8].strip()
+        
+        # Mostramos información detallada sobre el resultado procesado
+        print(f"{BRIGHT_GREEN}Resultado de operación procesado correctamente:{END}")
+        print(f"{BRIGHT_GREEN}  OperationID: {operation_id}{END}")
+        print(f"{BRIGHT_GREEN}  SignalID: {signal_id}{END}")
+        print(f"{BRIGHT_GREEN}  PnL: {pnl}{END}")
+        print(f"{BRIGHT_GREEN}  Razón de cierre: {close_reason}{END}")
+        
+        # Guardar el resultado en la base de datos
+        with sqlite3.connect(db_path) as conn:
+            c = conn.cursor()
+            c.execute('''
+            INSERT INTO operation_results 
+            (operation_id, signal_id, entry_time, entry_price, direction, exit_time, exit_price, pnl, close_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (operation_id, signal_id, entry_time, entry_price, direction, exit_time, exit_price, pnl, close_reason))
+            conn.commit()
+        
+        return {
+            'operation_id': operation_id,
+            'signal_id': signal_id,
+            'pnl': pnl,
+            'close_reason': close_reason
+        }
+    except Exception as e:
+        import traceback
+        print(f"{RED}Error al procesar resultado de operación: {e}{END}")
+        traceback.print_exc()
+        return None
+
+# Función para actualizar experiencias pendientes con resultados reales
+def update_pending_experience(signal_id, pnl):
+    global pending_experiences, reward_system
+    
+    if signal_id in pending_experiences:
+        experience = pending_experiences[signal_id]
+        
+        # Calcular recompensa real basada en el P&L
+        real_reward = reward_system.calculate_real_reward(pnl)
+        
+        # Almacenar la experiencia con la recompensa real
+        combined_reward = reward_system.store_experience(
+            signal_id, 
+            experience['action'], 
+            experience['simulated_reward'], 
+            real_reward,
+            experience['state'],
+            experience['next_state'],
+            experience['done']
+        )
+        
+        print(f"{BRIGHT_CYAN}Experiencia actualizada - SignalId: {signal_id}, Simulada: {experience['simulated_reward']:.2f}, Real: {real_reward:.2f}, Combinada: {combined_reward:.2f}, PnL: {pnl}{END}")
+        
+        # Reducir el factor alpha para dar más peso a las recompensas reales
+        reward_system.decay_alpha()
+        
+        # Eliminar de pendientes
+        del pending_experiences[signal_id]
+        return True
+    
+    return False
+
 async def receive_and_process_data():
-    global last_retrain_time, rolling_data, train_counter
-    version = "1.1.14"  # Versión actualizada según changelog
+    global last_retrain_time, rolling_data, train_counter, pending_experiences
     loop_counter = 0
     printOnce = False
     scaler = StandardScaler()
@@ -435,14 +764,30 @@ async def receive_and_process_data():
     model = None
     training_started = False
     feature_dimension = 0
-
+    
     # Intentar conectar con los servidores
     data_client.connect()
     metrics_client.connect()
+    results_client.connect()
 
     while True:
         # Verificar nuevas conexiones entrantes en el servidor de resultados
         results_server.check_new_clients()
+        
+        # Intentar recibir resultados de operaciones
+        result_messages = results_client.recv_message()
+        if result_messages and len(result_messages) > 0:
+            for result_message in result_messages:
+                operation_result = process_operation_result(result_message)
+                if operation_result:
+                    signal_id = operation_result['signal_id']
+                    pnl = operation_result['pnl']
+                    
+                    # Actualizar experiencias pendientes con resultados reales
+                    if update_pending_experience(signal_id, pnl):
+                        print(f"{BRIGHT_GREEN}Retroalimentación aplicada para SignalId: {signal_id}, PnL: {pnl}{END}")
+                    else:
+                        print(f"{YELLOW}No se encontró experiencia pendiente para SignalId: {signal_id}{END}")
         
         # Intentar recibir datos
         messages = data_client.recv_message()
@@ -494,56 +839,51 @@ async def receive_and_process_data():
                         features.append(0.0)
                 else:
                     features.append(0.0)  # Valor por defecto para campos vacíos
-            
-            # Asegurarse de que la longitud coincida con las columnas
-            while len(features) < len(rolling_data.columns):
-                features.append(0.0)
-            
+                    
             # Crear una nueva fila y agregarla al DataFrame
             new_row = pd.DataFrame([features], columns=rolling_data.columns)
             rolling_data = pd.concat([rolling_data, new_row], ignore_index=True)
+            
+            # Mantener el tamaño del DataFrame dentro de los límites
+            if len(rolling_data) > rolling_window_size:
+                rolling_data = rolling_data.iloc[-rolling_window_size:]
             
             # Imprimir información sobre los datos recibidos (solo ocasionalmente)
             if loop_counter % 100 == 0:
                 print(f"{BRIGHT_CYAN}Datos recibidos: {features[:3]}...{END}")
                 
-        except ValueError as e:
-            print(f"{RED}Error al convertir datos: {e} - Datos: {parsed_data}{END}")
-            continue
         except Exception as e:
             print(f"{RED}Error al procesar datos: {e}{END}")
             continue
-
+            
+        # Verificar si tenemos suficientes datos para entrenar
         if len(rolling_data) < min_data:
             loop_counter += 1
-            sys.stdout.write(f"\r{BRIGHT_GREEN}Waiting For Data Frame Min {loop_counter} of {min_data}{END}")
-            sys.stdout.flush()
+            if loop_counter % 1 == 0:
+                print(f"{BRIGHT_GREEN}Waiting For Data Frame Min {len(rolling_data)} of {min_data}{END}", end='\r')
             continue
-
-        if len(rolling_data) > rolling_window_size:
-            rolling_data = rolling_data.iloc[-rolling_window_size:]
-
+            
+        # Crear datos desplazados para predecir el precio futuro
         lagged_data = rolling_data.shift(lag_window_size).dropna()
-
+        
         if lagged_data.empty:
-            print('')
-            print(f"{CYAN}Waiting for more data to accumulate.{END}")
+            print(f"{CYAN}Esperando más datos para acumular.{END}")
             continue
-
-        # Verificar que haya columnas antes de intentar eliminar la columna de precio
+            
+        # Preparar datos para el entrenamiento
         if len(lagged_data.columns) > 1 and 'price' in lagged_data.columns:
             X = lagged_data.drop('price', axis=1).values
             y = rolling_data['price'].iloc[lag_window_size:].values
         else:
-            # Si solo hay una columna o ninguna, usar todos los datos disponibles
             X = lagged_data.values
             y = rolling_data.iloc[lag_window_size:].values
-
+            
+        # Verificar si es momento de reentrenar el modelo
         if len(X) >= 10 and X.shape[1] > 0 and (time.time() - last_retrain_time >= update_target_interval):
             X_scaled = scaler.fit_transform(X)
-            latest_features = X_scaled[-1, :].reshape(-1)  # Sin reshape adicional para SB3
+            latest_features = X_scaled[-1, :].reshape(-1)  # Solo para SB3
             
-            # Si es la primera vez, configuramos el entorno y el modelo
+            # Inicializar el modelo si no existe
             if not training_started:
                 feature_dimension = latest_features.shape[0]
                 print(f"{BRIGHT_BLUE}Inicializando entorno con dimensión de características: {feature_dimension}{END}")
@@ -551,13 +891,13 @@ async def receive_and_process_data():
                 # Crear entorno vectorizado
                 vec_env = DummyVecEnv([make_env(feature_dimension)])
                 
-                # Inicializar modelo PPO para trading con mayor exploración
+                # Inicializar modelo PPO con mucha mayor exploración (ent_coef=0.25)
                 model = PPO("MlpPolicy", vec_env, verbose=0, 
                            learning_rate=0.0003, 
                            n_steps=2048,
                            batch_size=64,
                            gamma=0.99,
-                           ent_coef=0.05,  # Aumentado de 0.01 a 0.05 para mayor exploración
+                           ent_coef=0.25,  # Aumentado significativamente para mucha más exploración
                            clip_range=0.2,
                            n_epochs=10)
                 
@@ -568,12 +908,23 @@ async def receive_and_process_data():
                 training_started = True
                 print(f"{BRIGHT_GREEN}Modelo PPO inicializado correctamente{END}")
             
-            # Actualizar el estado del entorno con los nuevos datos
+            # Actualizar el estado con los nuevos datos
             current_price = rolling_data['price'].iloc[-2]
             env.update_state(latest_features, current_price, previous_price if previous_price is not None else current_price)
             
-            # Predecir acción usando el modelo PPO
-            action, _ = model.predict(latest_features, deterministic=False)
+            # Generar ID único para la señal
+            signal_id = generate_signal_id()
+            
+            # Implementar mecanismo de forzado de exploración periódica
+            # Ocasionalmente forzar una acción diferente a la que el modelo sugeriría
+            if random.random() < 0.15:  # 15% de las veces
+                # Seleccionar una acción aleatoria (todas tienen igual probabilidad)
+                forced_action = random.randint(0, 2)
+                action = forced_action
+                print(f"{BRIGHT_MAGENTA}Forzando exploración - acción aleatoria: {action}{END}")
+            else:
+                # Predecir acción usando el modelo PPO
+                action, _ = model.predict(latest_features, deterministic=False)
             
             # Mostrar la acción predicha
             print('')
@@ -584,51 +935,71 @@ async def receive_and_process_data():
             else:  # action == 2
                 print(f"{BRIGHT_RED}Recommended trading action: Go short (Sell){END}")
             
-            # Ejecutar paso en el entorno para calcular recompensa
+            # Ejecutar paso en el entorno para calcular recompensa simulada
             if previous_price is not None:
-                _, reward, done, truncated, info = env.step(action)
+                _, simulated_reward, done, truncated, info = env.step(action)
                 
-                # Registrar la experiencia y el rendimiento
-                log_performance(loop_counter, action, reward, np.array([latest_features]), np.array([latest_features]), int(done))
+                # Calcular confianza basada en la recompensa acumulativa
+                confidence = min(0.99, max(0.5, (info['cumulative_reward'] + 10) / 20))
+                
+                # Guardar la señal en la base de datos
+                save_signal(signal_id, action, confidence, latest_features)
+                
+                # Almacenar como experiencia pendiente para actualizar con recompensa real
+                pending_experiences[signal_id] = {
+                    'action': action,
+                    'simulated_reward': simulated_reward,
+                    'state': np.array([latest_features]),
+                    'next_state': np.array([latest_features]),
+                    'done': int(done)
+                }
+                
+                # Registrar la experiencia para compatibilidad
+                log_performance(loop_counter, action, simulated_reward, np.array([latest_features]), np.array([latest_features]), int(done))
                 
                 # Mostrar información sobre la operación
-                print(f"{BRIGHT_CYAN}Reward: {reward} | Cumulative: {info['cumulative_reward']}{END}")
+                print(f"{BRIGHT_CYAN}Signal ID: {signal_id} | Simulated Reward: {simulated_reward} | Cumulative: {info['cumulative_reward']} | Confidence: {confidence:.4f}{END}")
                 
                 # Incrementar contador de entrenamiento
                 train_counter += 1
                 
-                # Entrenar el modelo periodicamente
+                # Entrenar el modelo periódicamente
                 if train_counter >= retrain_interval:
                     print(f"{BRIGHT_BLUE}Entrenando modelo PPO (iteración {train_counter}){END}")
-                    # Entrenar por 10 timesteps (un mini-batch)
-                    model.learn(total_timesteps=10)
+                    # Entrenar por 50 timesteps (aumentado de 10 a 50 para un aprendizaje más profundo)
+                    model.learn(total_timesteps=50)
                     train_counter = 0
                 
-                # Calcular confianza basada en la recompensa acumulativa normalizada
-                confidence = min(0.99, max(0.5, (info['cumulative_reward'] + 10) / 20))
-                # Enviar acción al socket con nivel de confianza
-                results_server.broadcast(f"{float(action)};{confidence:.4f};{time.time()}")
+                # Enviar acción al socket con ID, confianza y timestamp
+                # El formato debe ser: SignalId;Action;Confidence;Timestamp
+                print(f"{BRIGHT_GREEN}Enviando señal: ID={signal_id}, Acción={action}, Confianza={confidence:.4f}{END}")
+                results_server.broadcast(f"{signal_id};{float(action)};{confidence:.4f};{time.time()}")
             
             previous_price = current_price
             last_retrain_time = time.time()
 
 async def main():
     try:
-        await receive_and_process_data()
-    finally:
-        # Cerrar conexiones
-        data_client.close()
-        metrics_client.close()
-        results_server.close()
-        print(f"{BRIGHT_RED}Conexiones cerradas{END}")
-
-if __name__ == '__main__':
-    try:
         # Imprimir mensaje de inicio
         print(f"{BRIGHT_GREEN}Iniciando DeepQ con SB3 (PPO) para trading de futuros{END}")
         print(f"{BRIGHT_YELLOW}Conectando a NinjaTrader en puertos TCP estándar...{END}")
         
         # Ejecutar bucle principal
+        await receive_and_process_data()
+    except Exception as e:
+        import traceback
+        print(f"{RED}Un error ha ocurrido: {e}{END}")
+        traceback.print_exc()
+    finally:
+        # Cerrar conexiones
+        data_client.close()
+        metrics_client.close()
+        results_client.close()
+        results_server.close()
+        print(f"{BRIGHT_RED}Conexiones cerradas{END}")
+
+if __name__ == '__main__':
+    try:
         asyncio.run(main())
     except KeyboardInterrupt:
         print(f"{BRIGHT_YELLOW}Programa interrumpido por el usuario{END}")

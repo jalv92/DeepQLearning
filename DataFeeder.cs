@@ -30,18 +30,89 @@ using NinjaTrader.NinjaScript.DrawingTools;
 //This namespace holds Strategies in this folder and is required. Do not change it. 
 namespace NinjaTrader.NinjaScript.Strategies
 {
-	public class DataFeeder : Strategy
-	{
-		private TcpListener tcpServer;
-		private List<TcpClient> clients = new List<TcpClient>();
-		private int portNumber = 5555;
-		private bool isServerRunning = false;
+public class DataFeeder : Strategy
+{
+	private TcpListener tcpServer;
+	private List<TcpClient> clients = new List<TcpClient>();
+	private int portNumber = 5555;
+	private bool isServerRunning = false;
         
         // Client para recibir señales de DeepQ.py
         private TcpClient signalClient;
         private NetworkStream signalStream;
         private bool isSignalClientConnected = false;
         private int signalPort = 5590;
+        
+        // Servidor TCP para enviar resultados de operaciones
+        private TcpListener resultsServer;
+        private List<TcpClient> resultsClients = new List<TcpClient>();
+        private int resultsPort = 5591;
+        private bool isResultsServerRunning = false;
+        
+        // Sistema de seguimiento de operaciones
+        private class Operation
+        {
+            public string OperationId { get; set; }
+            public string SignalId { get; set; }
+            public DateTime EntryTime { get; set; }
+            public double EntryPrice { get; set; }
+            public int Direction { get; set; } // 1=Long, 2=Short
+            public bool IsOpen { get; set; }
+            public DateTime? ExitTime { get; set; }
+            public double? ExitPrice { get; set; }
+            public double? PnL { get; set; }
+            public string CloseReason { get; set; }
+            
+            public Operation(string operationId, string signalId, DateTime entryTime, double entryPrice, int direction)
+            {
+                OperationId = operationId;
+                SignalId = signalId;
+                EntryTime = entryTime;
+                EntryPrice = entryPrice;
+                Direction = direction;
+                IsOpen = true;
+                ExitTime = null;
+                ExitPrice = null;
+                PnL = null;
+                CloseReason = null;
+            }
+            
+            public void Close(DateTime exitTime, double exitPrice, double pnl, string closeReason)
+            {
+                IsOpen = false;
+                ExitTime = exitTime;
+                ExitPrice = exitPrice;
+                PnL = pnl;
+                CloseReason = closeReason;
+            }
+            
+            public string ToResultMessage()
+            {
+                if (!IsOpen && ExitTime.HasValue && ExitPrice.HasValue && PnL.HasValue)
+                {
+                    // Formato: operationId;signalId;entryTime;entryPrice;direction;exitTime;exitPrice;pnl;closeReason
+                    // Usar CultureInfo.InvariantCulture para todos los valores numéricos para asegurar formato consistente
+                    string resultMessage = string.Format("{0};{1};{2};{3};{4};{5};{6};{7};{8}",
+                        OperationId,
+                        SignalId,
+                        EntryTime.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture),
+                        EntryPrice.ToString("0.0000", CultureInfo.InvariantCulture),
+                        Direction.ToString(CultureInfo.InvariantCulture),
+                        ExitTime.Value.ToString("yyyy-MM-dd HH:mm:ss.fff", CultureInfo.InvariantCulture),
+                        ExitPrice.Value.ToString("0.0000", CultureInfo.InvariantCulture),
+                        PnL.Value.ToString("0.0000", CultureInfo.InvariantCulture),
+                        CloseReason
+                    );
+                    
+                    // No usar Print directamente aquí ya que es un método de instancia de NinjaScript
+                    // La clase que use este mensaje puede imprimirlo si es necesario
+                    return resultMessage;
+                }
+                return null;
+            }
+        }
+        
+        private Dictionary<string, Operation> operations = new Dictionary<string, Operation>();
         
         // Referencia al indicador TheStrat
         private HFT_TheStrat_ML stratIndicator;
@@ -60,6 +131,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             // Señales recibidas desde DeepQ
             public class Signal
             {
+                public string SignalId { get; set; }
                 public int Action { get; set; } // 0=Hold, 1=Buy, 2=Sell
                 public double Confidence { get; set; }
                 public DateTime Timestamp { get; set; }
@@ -67,10 +139,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             
             private List<Signal> signalBuffer = new List<Signal>();
             
-            public void AddSignal(int action, double confidence)
+            public void AddSignal(string signalId, int action, double confidence)
             {
                 Signal newSignal = new Signal
                 {
+                    SignalId = signalId,
                     Action = action,
                     Confidence = confidence,
                     Timestamp = DateTime.Now
@@ -173,6 +246,104 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool limitMessagePrinted = false;
         private DateTime limitMessageDate = DateTime.MinValue;
 
+        // Método para iniciar el servidor TCP de resultados
+        private void StartResultsServer()
+        {
+            try
+            {
+                resultsServer = new TcpListener(IPAddress.Loopback, resultsPort);
+                resultsServer.Start();
+                isResultsServerRunning = true;
+                
+                // Iniciar un hilo para aceptar conexiones
+                Task.Run(() => AcceptResultsClientsAsync());
+                
+                Print($"DataFeeder: Servidor TCP de resultados iniciado en puerto {resultsPort}");
+            }
+            catch (Exception ex)
+            {
+                Print($"DataFeeder: Error al iniciar servidor TCP de resultados: {ex.Message}");
+                isResultsServerRunning = false;
+            }
+        }
+        
+        // Método para aceptar clientes en el servidor de resultados
+        private async Task AcceptResultsClientsAsync()
+        {
+            while (isResultsServerRunning)
+            {
+                try
+                {
+                    TcpClient client = await resultsServer.AcceptTcpClientAsync();
+                    lock (resultsClients)
+                    {
+                        resultsClients.Add(client);
+                    }
+                    Print($"DataFeeder: Nuevo cliente conectado al servidor de resultados. Total: {resultsClients.Count}");
+                }
+                catch (Exception ex)
+                {
+                    if (isResultsServerRunning)
+                    {
+                        Print($"DataFeeder: Error al aceptar cliente en servidor de resultados: {ex.Message}");
+                    }
+                }
+            }
+        }
+        
+        // Método para enviar resultados a los clientes conectados
+        private void SendResultToClients(string message)
+        {
+            if (!isResultsServerRunning || resultsClients.Count == 0) return;
+            
+            byte[] data = Encoding.ASCII.GetBytes(message + "\n");
+            
+            lock (resultsClients)
+            {
+                // Crear una lista de clientes que se desconectaron
+                List<TcpClient> disconnectedClients = new List<TcpClient>();
+                
+                foreach (var client in resultsClients)
+                {
+                    try
+                    {
+                        if (client.Connected)
+                        {
+                            NetworkStream stream = client.GetStream();
+                            if (stream.CanWrite)
+                            {
+                                stream.Write(data, 0, data.Length);
+                            }
+                            else
+                            {
+                                disconnectedClients.Add(client);
+                            }
+                        }
+                        else
+                        {
+                            disconnectedClients.Add(client);
+                        }
+                    }
+                    catch
+                    {
+                        disconnectedClients.Add(client);
+                    }
+                }
+                
+                // Eliminar clientes desconectados
+                foreach (var client in disconnectedClients)
+                {
+                    resultsClients.Remove(client);
+                    client.Close();
+                }
+                
+                if (disconnectedClients.Count > 0)
+                {
+                    Print($"DataFeeder: {disconnectedClients.Count} cliente(s) de resultados desconectado(s). Restantes: {resultsClients.Count}");
+                }
+            }
+        }
+        
         // Método para iniciar el servidor TCP
         private void StartServer()
         {
@@ -192,6 +363,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Task.Run(() => AcceptClientsAsync());
                 
                 Print($"DataFeeder: Servidor TCP iniciado en puerto {portNumber}");
+                
+                // Iniciar servidor de resultados
+                StartResultsServer();
                 
                 // Iniciar cliente para recibir señales
                 StartSignalClient();
@@ -306,7 +480,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Limpiar el mensaje de caracteres no deseados
                 message = message.Replace("\n", "").Replace("\r", "").Trim();
                 
-                // Formato esperado: Action;Confidence;Timestamp
+                // Formato esperado: SignalId;Action;Confidence;Timestamp
                 string[] parts = message.Split(';');
                 
                 if (parts == null)
@@ -315,69 +489,80 @@ namespace NinjaTrader.NinjaScript.Strategies
                     return;
                 }
                 
-                if (parts.Length < 2)
+                if (parts.Length < 4) // Requerimos exactamente 4 partes
                 {
-                    Print($"DataFeeder: Formato de mensaje incorrecto, partes insuficientes: {parts.Length}");
+                    Print($"DataFeeder: Formato de mensaje incorrecto, partes insuficientes: {parts.Length}, mensaje: '{message}'");
                     return;
                 }
                 
-                // Limpiar y validar los valores con verificaciones más estrictas
-                string actionStr = parts[0]?.Trim() ?? "";
-                string confidenceStr = parts[1]?.Trim() ?? "";
+                // Extraer cada parte del mensaje con manejo específico
+                string signalId = parts[0].Trim();
+                string actionStr = parts[1].Trim();
+                string confidenceStr = parts[2].Trim();
+                string timestampStr = parts[3].Trim();
                 
-                if (string.IsNullOrEmpty(actionStr) || string.IsNullOrEmpty(confidenceStr))
+                // Validar que el ID es un GUID
+                if (!Guid.TryParse(signalId, out _))
                 {
-                    Print($"DataFeeder: Valores de acción o confianza vacíos: Action='{actionStr}', Confidence='{confidenceStr}'");
+                    Print($"DataFeeder: El ID de señal no es un UUID válido: '{signalId}'");
                     return;
                 }
                 
-                // Mostrar mensaje de depuración
-                Print($"DataFeeder: Mensaje recibido: '{message}', Partes: {parts.Length}, Action: '{actionStr}', Confidence: '{confidenceStr}'");
-                
-                // Intentar convertir con manejo de errores
+                // Convertir la acción a float con manejo detallado de errores
                 float actionFloat;
-                double confidence;
-                
                 if (!float.TryParse(actionStr, NumberStyles.Any, CultureInfo.InvariantCulture, out actionFloat))
                 {
                     Print($"DataFeeder: No se pudo convertir la acción a float: '{actionStr}'");
                     return;
                 }
                 
+                // Convertir la confianza a double con manejo detallado de errores
+                double confidence;
                 if (!double.TryParse(confidenceStr, NumberStyles.Any, CultureInfo.InvariantCulture, out confidence))
                 {
                     Print($"DataFeeder: No se pudo convertir la confianza a double: '{confidenceStr}'");
                     return;
                 }
                 
+                // Convertir la acción a entero
                 int action = (int)Math.Round(actionFloat);
                 
-                // Validar rango de acción
+                // Validar que la acción esté en el rango válido
                 if (action < 0 || action > 2)
                 {
-                    Print($"DataFeeder: Acción fuera de rango: {action}");
+                    Print($"DataFeeder: Acción fuera de rango válido (0-2): {action}");
+                    return;
+                }
+
+                // Validar que la confianza está en el rango válido
+                if (confidence < 0 || confidence > 1)
+                {
+                    Print($"DataFeeder: Confianza fuera de rango válido (0-1): {confidence}");
                     return;
                 }
                 
-                Print($"DataFeeder: Señal recibida de DeepQ - Acción: {action}, Confianza: {confidence:P2}");
+                // Mensaje detallado para debugging
+                Print($"DataFeeder: Señal procesada correctamente - ID: {signalId}, Acción: {action}, Confianza: {confidence:P2}, Timestamp: {timestampStr}");
                 
-                try {
+                try 
+                {
                     // Añadir al sistema de votación - verificar que el sistema esté inicializado
                     if (votingSystem != null)
                     {
-                        votingSystem.AddSignal(action, confidence);
+                        votingSystem.AddSignal(signalId, action, confidence);
                     }
                     else
                     {
                         Print("DataFeeder: ADVERTENCIA - votingSystem es null, reinicializando");
                         votingSystem = new VotingSystem();
-                        votingSystem.AddSignal(action, confidence);
+                        votingSystem.AddSignal(signalId, action, confidence);
                     }
                     
                     // Solo evaluar operaciones si la acción no es Hold (0)
                     if (action > 0)
                     {
-                        try {
+                        try 
+                        {
                             // Evaluar si debemos ejecutar una operación
                             EvaluateAndExecuteTrade();
                         }
@@ -468,7 +653,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private TimeSpan minimumOrderInterval = TimeSpan.FromMinutes(2); // Reducido de 5 a 2 minutos
 
         // Método para ejecutar operaciones utilizando ATM Strategy de NinjaTrader
-        private void ExecuteTrade(int action, double confidence)
+        private void ExecuteTrade(int action, double confidence, string signalId = null)
         {
             // Verificar si ya hay órdenes pendientes o si ha pasado muy poco tiempo desde el último intento
             if (orderInProgress || HasPendingOrders())
@@ -488,6 +673,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             orderInProgress = true;
             lastOrderAttemptTime = DateTime.Now;
             
+            // Generar ID único para la operación si no se proporcionó un signalId
+            if (string.IsNullOrEmpty(signalId))
+            {
+                signalId = Guid.NewGuid().ToString();
+            }
+            
             try
             {
                 // Obtener precio actual
@@ -499,6 +690,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 // Generar IDs únicos para la estrategia ATM
                 string atmStrategyId = GetAtmStrategyUniqueId();
                 string orderId = GetAtmStrategyUniqueId();
+                string operationId = Guid.NewGuid().ToString();
                 
                 bool atmCreated = false;
                 
@@ -527,11 +719,25 @@ namespace NinjaTrader.NinjaScript.Strategies
                                 activeAtmStrategies.Add(atmStrategyId);
                             }
                             
+                            // Registrar la operación en el sistema de seguimiento
+                            Operation newOperation = new Operation(
+                                operationId,
+                                signalId,
+                                DateTime.Now,
+                                currentPrice,
+                                1 // Direction = Long
+                            );
+                            
+                            lock (operations)
+                            {
+                                operations[operationId] = newOperation;
+                            }
+                            
                             // Incrementar contador si la estrategia se creó correctamente
                             dailyTradeCount++;
                             lastTradeDate = DateTime.Now;
                             Print($"DataFeeder: Contador incrementado a {dailyTradeCount}/{MaxDailyTrades}");
-                            Print($"DataFeeder: ORDEN LONG ejecutada con ATM - Precio: {currentPrice}, Confianza: {confidence:P2}");
+                            Print($"DataFeeder: ORDEN LONG ejecutada con ATM - Precio: {currentPrice}, Confianza: {confidence:P2}, OperationId: {operationId}, SignalId: {signalId}");
                         }
                         else
                         {
@@ -563,11 +769,25 @@ namespace NinjaTrader.NinjaScript.Strategies
                                 activeAtmStrategies.Add(atmStrategyId);
                             }
                             
+                            // Registrar la operación en el sistema de seguimiento
+                            Operation newOperation = new Operation(
+                                operationId,
+                                signalId,
+                                DateTime.Now,
+                                currentPrice,
+                                2 // Direction = Short
+                            );
+                            
+                            lock (operations)
+                            {
+                                operations[operationId] = newOperation;
+                            }
+                            
                             // Incrementar contador si la estrategia se creó correctamente
                             dailyTradeCount++;
                             lastTradeDate = DateTime.Now;
                             Print($"DataFeeder: Contador incrementado a {dailyTradeCount}/{MaxDailyTrades}");
-                            Print($"DataFeeder: ORDEN SHORT ejecutada con ATM - Precio: {currentPrice}, Confianza: {confidence:P2}");
+                            Print($"DataFeeder: ORDEN SHORT ejecutada con ATM - Precio: {currentPrice}, Confianza: {confidence:P2}, OperationId: {operationId}, SignalId: {signalId}");
                         }
                         else
                         {
@@ -584,6 +804,87 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 // Importante: garantizar que siempre liberamos el flag de operación en proceso
                 orderInProgress = false;
+            }
+        }
+        
+        // Método para procesar cuando una posición se cierra (para retroalimentación)
+        protected override void OnPositionUpdate(Position position, double averagePrice, int quantity, MarketPosition marketPosition)
+        {
+            if (marketPosition == MarketPosition.Flat)
+            {
+                // Una posición se ha cerrado, buscar la operación correspondiente
+                string atm = position.Account != null ? position.Account.Name : string.Empty;
+                string closeReason = "Unknown";
+                
+                // Determinar la razón de cierre basado en patrones comunes
+                // En NinjaTrader 8 no podemos acceder directamente al tipo de orden que cerró la posición
+                // así que usamos lógica alternativa
+                
+                // Verificar si hay una estrategia ATM activa
+                bool foundAtmStrategy = false;
+                foreach (string atmId in activeAtmStrategies)
+                {
+                    try
+                    {
+                        if (GetAtmStrategyMarketPosition(atmId) == MarketPosition.Flat)
+                        {
+                            foundAtmStrategy = true;
+                            closeReason = "ATM_Strategy_Closed";
+                            break;
+                        }
+                    }
+                    catch { }
+                }
+                
+                if (!foundAtmStrategy)
+                {
+                    // Si no encontramos una estrategia ATM, podemos intentar inferir la razón
+                    // por el precio de cierre en relación con el precio de entrada
+                    
+                    // Por ahora, asumimos "ManualClose" como valor predeterminado
+                    closeReason = "ManualClose";
+                }
+                
+                // Buscar todas las operaciones abiertas que correspondan a la posición cerrada
+                lock (operations)
+                {
+                    var operationsToClose = operations.Values
+                        .Where(op => op.IsOpen)
+                        .ToList();
+                    
+                    if (operationsToClose.Any())
+                    {
+                        double exitPrice = Close[0]; // Usar el precio actual como precio de salida
+                        DateTime exitTime = Time[0];
+                        
+                        foreach (var operation in operationsToClose)
+                        {
+                            // Calcular PnL
+                            double pnl = 0;
+                            int positionQuantity = Position.Quantity > 0 ? Position.Quantity : 1; // Evitar división por cero
+                            
+                            if (operation.Direction == 1) // Long
+                            {
+                                pnl = (exitPrice - operation.EntryPrice) * positionQuantity;
+                            }
+                            else if (operation.Direction == 2) // Short
+                            {
+                                pnl = (operation.EntryPrice - exitPrice) * positionQuantity;
+                            }
+                            
+                            // Cerrar la operación
+                            operation.Close(exitTime, exitPrice, pnl, closeReason);
+                            
+                            // Enviar el resultado a los clientes conectados
+                            string resultMessage = operation.ToResultMessage();
+                            if (!string.IsNullOrEmpty(resultMessage))
+                            {
+                                SendResultToClients(resultMessage);
+                                Print($"DataFeeder: Enviado resultado de operación - {resultMessage}");
+                            }
+                        }
+                    }
+                }
             }
         }
         
@@ -605,6 +906,47 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (position == MarketPosition.Flat)
                     {
                         Print($"DataFeeder: Estrategia ATM {atmStrategyId} ha sido cerrada");
+                        
+                        // Buscar operaciones asociadas a esta estrategia para enviar resultados
+                        try
+                        {
+                            double avgPrice = GetAtmStrategyPositionAveragePrice(atmStrategyId);
+                            int quantity = GetAtmStrategyPositionQuantity(atmStrategyId);
+                            double pnl = GetAtmStrategyUnrealizedProfitLoss(atmStrategyId);
+                            
+                            // La estrategia se ha cerrado, buscar operaciones abiertas y cerrarlas
+                            lock (operations)
+                            {
+                                var operationsToClose = operations.Values
+                                    .Where(op => op.IsOpen)
+                                    .ToList();
+                                
+                                if (operationsToClose.Any())
+                                {
+                                    double exitPrice = Close[0]; // Usar el precio actual como precio de salida
+                                    DateTime exitTime = Time[0];
+                                    
+                                    foreach (var operation in operationsToClose)
+                                    {
+                                        // Cerrar la operación
+                                        operation.Close(exitTime, exitPrice, pnl, "ATM_Strategy_Closed");
+                                        
+                                        // Enviar el resultado a los clientes conectados
+                                        string resultMessage = operation.ToResultMessage();
+                                        if (!string.IsNullOrEmpty(resultMessage))
+                                        {
+                                            SendResultToClients(resultMessage);
+                                            Print($"DataFeeder: Enviado resultado de operación - {resultMessage}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Print($"DataFeeder: Error al procesar cierre de ATM {atmStrategyId}: {ex.Message}");
+                        }
+                        
                         completedStrategies.Add(atmStrategyId);
                         continue;
                     }
@@ -949,6 +1291,37 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
         
+        // Método para cerrar el servidor de resultados
+        private void CloseResultsServer()
+        {
+            isResultsServerRunning = false;
+            
+            lock (resultsClients)
+            {
+                foreach (var client in resultsClients)
+                {
+                    try
+                    {
+                        client.Close();
+                    }
+                    catch { }
+                }
+                resultsClients.Clear();
+            }
+            
+            if (resultsServer != null)
+            {
+                try
+                {
+                    resultsServer.Stop();
+                }
+                catch { }
+                resultsServer = null;
+            }
+            
+            Print("DataFeeder: Servidor TCP de resultados cerrado");
+        }
+        
         // Método para cerrar el servidor y liberar recursos
         private void CloseServer()
         {
@@ -976,6 +1349,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 catch { }
                 tcpServer = null;
             }
+            
+            // Cerrar el servidor de resultados
+            CloseResultsServer();
             
             Print("DataFeeder: Servidor TCP cerrado");
         }
