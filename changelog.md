@@ -1,4 +1,107 @@
 # Changelog
+[2025-04-05 00:39:15]
+
+## [1.1.32] - 2025-04-05 00:39:15
+
+### Corregido
+- Solucionados los avisos de depreciación de NumPy 1.25 relacionados con la conversión de arrays con ndim > 0 a escalares
+- Implementado método seguro para extraer elementos escalares de arrays NumPy usando .item() cuando está disponible
+- Añadidos adaptadores personalizados para datetime en SQLite para resolver la advertencia de depreciación en Python 3.12
+- Mejorada la gestión de conexiones SQLite para habilitar la detección y conversión de tipos
+
+# Changelog
+[2025-04-05 00:29:45]
+
+## [1.1.31] - 2025-04-05 00:29:45
+
+### Corregido
+- Solucionados problemas críticos de indentación en la función receive_and_process_data
+- Corregido el tratamiento de los mensajes recibidos que estaba anidado incorrectamente
+- Actualizadas todas las referencias a constantes ANSI para usar la clase Colors
+- Añadida la llamada a configure_lag_window() para permitir personalización de ventanas de tiempo
+- Implementada la carga del buffer de reproducción desde la base de datos en la inicialización
+- Eliminadas redefiniciones redundantes de variables globales
+
+# Changelog
+[2025-04-05 00:14:45]
+
+## [1.1.30] - 2025-04-05 00:14:45
+
+### Optimizado
+- Reestructurado el código en DeepQ.py para mejorar la legibilidad y mantenimiento
+- Creada una clase Config para centralizar la configuración global del sistema
+- Implementada estructura de clases más eficiente para la comunicación TCP con una clase base común
+- Añadida documentación detallada a funciones y clases para facilitar futuras modificaciones
+- Mejorada la organización de códigos de color ANSI en una clase dedicada
+- Mejorado el manejo de estados en TradingEnv con un método auxiliar _ensure_correct_state_format
+- Eliminados códigos duplicados y variables redundantes que ya no se utilizaban
+- Reorganizadas las funciones relacionadas para mejorar la legibilidad y comprensión del flujo de trabajo
+- Corregidos problemas de formato e indentación para asegurar consistencia en el código
+
+# Changelog
+[2025-04-04 23:58:36]
+
+## [1.1.29] - 2025-04-04 23:58:36
+
+### Corregido
+- Solucionado el error crítico: "Unexpected observation shape (10, 1000) for Box environment, please use (10, 10000)"
+- Simplificada la clase TradingEnv eliminando la dependencia en LSTM para mayor estabilidad
+- Convertido el espacio de observación de 2D [sequence_length, feature_dimension] a 1D [feature_dimension]
+- Eliminado el buffer de secuencias y reemplazado por un único vector de estado
+- Modificado el método update_state para trabajar con vectores simples en lugar de secuencias
+- Optimizado el flujo de datos para usar directamente el estado actual en lugar de secuencias LSTM
+- Actualizado el formato de las predicciones para trabajar con la nueva estructura de datos
+- Forzado el uso de CPU exclusivamente para evitar problemas de compatibilidad con CUDA
+
+# Changelog
+[2025-04-04 23:36:59]
+
+## [1.1.28] - 2025-04-04 23:36:59
+
+### Corregido
+- Solucionado error de advertencia SB3 relacionado con el formato net_arch
+- Forzado el uso de CPU para MlpPolicy según recomendación de SB3 (issue #1245)
+- Mejorado el manejo de la conexión con el servidor de métricas (puerto 5554)
+- Implementada tolerancia a fallos en conexiones no críticas
+- Añadidos mensajes informativos más claros sobre el estado de conexiones
+
+# Changelog
+[2025-04-04 23:23:49]
+
+## [1.1.27] - 2025-04-04 23:23:49
+
+### Corregido
+- Solucionado error "Unexpected observation shape (10, 10) for Box environment, please use (10, 100)" en DeepQ.py
+- Aumentada la dimensión mínima de características de 10 a 100 para compatibilidad con SB3 v2.0.0
+- Mejorado el método de relleno de estados para asegurar compatibilidad dimensional con modelos de aprendizaje
+- Optimizada la arquitectura para mantener un rendimiento adecuado con las nuevas dimensiones
+
+# Changelog
+[2025-04-04 22:59:33]
+
+## [1.1.26] - 2025-04-04 22:59:33
+
+### Corregido
+- Solucionado error "Policy MlpLstmPolicy unknown" en DeepQ.py sustituyendo por MlpPolicy compatible con SB3 v2.0.0
+- Corregido error de dimensiones en el espacio de observación asegurando que feature_dimension sea al menos 10
+- Implementado método _pad_state para rellenar vectores de estado a la dimensión correcta
+- Optimizada la arquitectura de red con parámetros para secuencias de datos
+- Actualizada la inicialización del modelo para trabajar con el espacio de observación 2D
+- Eliminadas las clases y métodos obsoletos no compatibles con SB3 v2.0.0
+
+# Changelog
+[2025-04-04 22:40:32]
+
+## [1.1.26] - 2025-04-04 22:40:32
+
+### Corregido
+- Solucionado error "Policy MlpLstmPolicy unknown" en DeepQ.py
+- Actualizada la integración con stable-baselines3 v2.0.0 para usar "MlpPolicy" en lugar de "MlpLstmPolicy"
+- Implementada configuración personalizada de redes neuronales para mantener la funcionalidad LSTM
+- Añadida importación de ActorCriticPolicy para compatibilidad con SB3 v2.0.0
+- Mejorada la arquitectura de red neural con parámetros optimizados para secuencias de datos
+
+# Changelog
 [2025-04-04 22:07:11]
 
 ## [1.1.25] - 2025-04-04 22:07:11

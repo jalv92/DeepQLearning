@@ -1,6 +1,5 @@
 import os
 import asyncio
-import sys
 import time
 import socket
 import sqlite3
@@ -9,73 +8,60 @@ import numpy as np
 import math
 import uuid
 import torch
-import psutil
+import random
 from datetime import datetime
 from collections import deque
-import gymnasium as gym  # Cambiado de gym a gymnasium
+import gymnasium as gym
 from gymnasium import spaces
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
-from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
 from sklearn.preprocessing import StandardScaler
-import random
 from torch.utils.tensorboard import SummaryWriter
 
-# Verificar disponibilidad de CUDA
-CUDA_AVAILABLE = torch.cuda.is_available()
-if CUDA_AVAILABLE:
-    torch.backends.cudnn.benchmark = True  # Optimización para redes recurrentes
-    num_gpus = torch.cuda.device_count()
-    current_device = torch.cuda.current_device()
-    device_name = torch.cuda.get_device_name(current_device)
-    print(f"\033[92mCUDA disponible: {num_gpus} GPU(s) detectada(s)")
-    print(f"Usando GPU: {device_name}\033[0m")
-else:
-    print("\033[91mCUDA no disponible. Usando CPU.\033[0m")
-
+# Configuración para Windows
 if os.name == 'nt':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 os.system('color')
 
-# ANSI Color Codes
-BLACK = "\033[30m"
-RED = "\033[31m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-BLUE = "\033[34m"
-MAGENTA = "\033[35m"
-CYAN = "\033[36m"
-WHITE = "\033[37m"
-BRIGHT_BLACK = "\033[90m"
-BRIGHT_RED = "\033[91m"
-BRIGHT_GREEN = "\033[92m"
-BRIGHT_YELLOW = "\033[93m"
-BRIGHT_BLUE = "\033[94m"
-BRIGHT_MAGENTA = "\033[95m"
-BRIGHT_CYAN = "\033[96m"
-BRIGHT_WHITE = "\033[97m"
-END = "\033[0m"
+# ANSI Color Codes para mejor legibilidad en la consola
+class Colors:
+    BLACK = "\033[30m"
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    BRIGHT_BLACK = "\033[90m"
+    BRIGHT_RED = "\033[91m"
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_YELLOW = "\033[93m"
+    BRIGHT_BLUE = "\033[94m"
+    BRIGHT_MAGENTA = "\033[95m"
+    BRIGHT_CYAN = "\033[96m"
+    BRIGHT_WHITE = "\033[97m"
+    END = "\033[0m"
 
-# Define TradingEnv class compatible with Gymnasium and optimizado para LSTM
 class TradingEnv(gym.Env):
-    def __init__(self, feature_dimension, sequence_length=10):
+    """
+    Entorno de trading compatible con Gymnasium para aprendizaje por refuerzo.
+    Versión simplificada que utiliza vectores de características sin LSTM.
+    """
+    def __init__(self, feature_dimension):
         super(TradingEnv, self).__init__()
         # Definir el espacio de acciones y observaciones
         self.action_space = spaces.Discrete(3)  # 0: Hold, 1: Buy, 2: Sell
-        
-        # Para LSTM, necesitamos un buffer de secuencias temporal
-        self.sequence_length = sequence_length
         self.feature_dimension = feature_dimension
         
-        # El espacio de observación es ahora un tensor 2D [sequence_length, feature_dimension]
-        # que representa una secuencia de estados para el LSTM
+        # El espacio de observación es un tensor 1D [feature_dimension]
         self.observation_space = spaces.Box(
             low=-np.inf, 
             high=np.inf, 
-            shape=(sequence_length, feature_dimension), 
+            shape=(self.feature_dimension,), 
             dtype=np.float32
         )
         
@@ -84,46 +70,34 @@ class TradingEnv(gym.Env):
         self.previous_price = 0
         self.position = 0  # 0: sin posición, 1: long, -1: short
         
-        # Buffer de secuencia para LSTM
-        self.state_buffer = deque(maxlen=sequence_length)
+        # Estado actual
+        self.current_state = None
         
         # Seguimiento de rendimiento
         self.cumulative_reward = 0
         self.trade_count = 0
         
-        # Configuración CUDA para aceleración
-        self.device = torch.device("cuda" if CUDA_AVAILABLE else "cpu")
-        
     def reset(self, *, seed=None, options=None, initial_state=None):
-        # Inicializar secuencia de estados para LSTM
-        self.state_buffer.clear()
-        
-        # Crear estado inicial (una secuencia de estados idénticos)
+        """Reinicia el entorno y devuelve el estado inicial"""
+        # Crear estado inicial
         if initial_state is not None:
-            initial_features = initial_state
+            self.current_state = self._ensure_correct_state_format(initial_state)
         else:
-            initial_features = np.zeros(self.feature_dimension, dtype=np.float32)
-            
-        # Llenar el buffer con el estado inicial repetido
-        for _ in range(self.sequence_length):
-            self.state_buffer.append(initial_features)
-            
-        # Crear tensor de secuencia para LSTM
-        current_sequence = np.array(self.state_buffer, dtype=np.float32)
+            self.current_state = np.zeros(self.feature_dimension, dtype=np.float32)
         
         # Reiniciar métricas
         self.position = 0
         self.cumulative_reward = 0
         self.trade_count = 0
         
-        return current_sequence, {}  # Devuelve la secuencia y diccionario de info vacío
+        return self.current_state, {}  # Devuelve el estado y diccionario de info vacío
         
     def step(self, action):
+        """Ejecuta una acción en el entorno y devuelve el resultado"""
         # Calcular recompensa basada en la acción y movimiento del precio
         reward = 0
         done = False
         truncated = False  # Parámetro requerido por Gymnasium
-        info = {}
         
         # Precio aumentó
         if self.current_price > self.previous_price:
@@ -163,78 +137,95 @@ class TradingEnv(gym.Env):
             'position': self.position
         }
         
-        # Devolver la secuencia actual como estado (para LSTM)
-        current_sequence = np.array(self.state_buffer, dtype=np.float32)
-        
-        return current_sequence, reward, done, truncated, info
+        return self.current_state, reward, done, truncated, info
     
     def update_state(self, new_state, current_price, previous_price):
-        """
-        Actualiza el estado actual añadiendo un nuevo estado al buffer de secuencia.
-        Optimizado para LSTM y CUDA.
-        """
+        """Actualiza el estado actual con un nuevo estado y precios"""
         # Actualizar precios
         self.current_price = current_price
         self.previous_price = previous_price
         
-        # Optimización para CUDA: Convertir a tensor si no lo es ya
-        if CUDA_AVAILABLE and not isinstance(new_state, torch.Tensor):
-            # Convertir a tensor y mover a GPU
-            new_state_tensor = torch.tensor(new_state, dtype=torch.float32, device=self.device)
-            # Convertir de vuelta a numpy para compatibilidad con el resto del código
-            # pero mantener una copia en CUDA para operaciones futuras
-            self._last_cuda_state = new_state_tensor
-            new_state = new_state
-        
-        # Añadir nuevo estado al buffer (automáticamente elimina el más antiguo si está lleno)
-        self.state_buffer.append(new_state)
-        
-        # Si el buffer no está lleno todavía, rellenarlo con copias del nuevo estado
-        while len(self.state_buffer) < self.sequence_length:
-            self.state_buffer.append(new_state)
+        # Procesar y actualizar el estado
+        self.current_state = self._ensure_correct_state_format(new_state)
+    
+    def _ensure_correct_state_format(self, state):
+        """Asegura que el estado tenga el formato correcto para el entorno"""
+        # Convertir a array numpy si no lo es ya
+        if not isinstance(state, np.ndarray):
+            state = np.array([state], dtype=np.float32)
+            
+        # Asegurar que el estado tenga la dimensión correcta
+        if len(state.shape) == 0:  # Es un escalar
+            state = np.array([state], dtype=np.float32)
+            
+        # Rellenar o recortar a la dimensión correcta
+        if state.shape[0] < self.feature_dimension:
+            padded_state = np.zeros(self.feature_dimension, dtype=np.float32)
+            padded_state[:state.shape[0]] = state
+            return padded_state
+        elif state.shape[0] > self.feature_dimension:
+            return state[:self.feature_dimension].astype(np.float32)
+        else:
+            return state.astype(np.float32)
 
-# Initialize variables
-default_lag_window_size = 3000
-lag_window_size = default_lag_window_size
-rolling_window_size = lag_window_size + 1000
-min_data = lag_window_size - 1
-retrain_interval = 10  # Entrenar cada 10 iteraciones
-train_counter = 0  # Contador para el entrenamiento
-epsilon = 1.0  # Initial exploration rate
-epsilon_min = 0.1  # Minimum exploration rate
-epsilon_decay = 0.995  # Decay rate for exploration
-batch_size = 64
+# Configuración global
+class Config:
+    # Ventanas de tiempo
+    DEFAULT_LAG_WINDOW_SIZE = 3000
+    LAG_WINDOW_SIZE = DEFAULT_LAG_WINDOW_SIZE
+    ROLLING_WINDOW_SIZE = LAG_WINDOW_SIZE + 1000
+    MIN_DATA = LAG_WINDOW_SIZE - 1
+    
+    # Parámetros de entrenamiento
+    RETRAIN_INTERVAL = 10  # Entrenar cada 10 iteraciones
+    BATCH_SIZE = 64
+    
+    # Puertos TCP por defecto
+    DATA_PORT = 5555
+    METRICS_PORT = 5554
+    SIGNALS_PORT = 5590
+    RESULTS_PORT = 5591
+    
+    # Versión del software
+    VERSION = "1.1.32"  # Versión actualizada con fixes para depreciaciones
 
-rolling_data = pd.DataFrame()
-replay_buffer = deque(maxlen=2000)
-action_size = 3  # [Hold, Buy, Sell]
-
-
-# Set up TCP client sockets
-import socket
-
-class TCPClient:
+# Clase base para comunicación TCP
+class TCPBase:
     def __init__(self, host='localhost', port=5555):
         self.host = host
         self.port = port
         self.sock = None
         self.buffer = b''
         self.connected = False
-        
+    
     def connect(self):
+        """Intenta conectar con el servidor"""
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.connect((self.host, self.port))
             self.sock.setblocking(False)
             self.connected = True
-            print(f"{BRIGHT_GREEN}Conectado al servidor {self.host}:{self.port}{END}")
+            print(f"{Colors.BRIGHT_GREEN}Conectado al servidor {self.host}:{self.port}{Colors.END}")
             return True
         except Exception as e:
-            print(f"{RED}Error al conectar con {self.host}:{self.port}: {e}{END}")
+            print(f"{Colors.RED}Error al conectar con {self.host}:{self.port}: {e}{Colors.END}")
             self.connected = False
             return False
-            
+    
+    def close(self):
+        """Cierra la conexión"""
+        if self.sock:
+            try:
+                self.sock.close()
+            except:
+                pass
+            self.sock = None
+        self.connected = False
+
+class TCPClient(TCPBase):
+    """Cliente TCP para recibir datos"""
     def recv_message(self):
+        """Recibe mensajes del servidor"""
         if not self.connected:
             if not self.connect():
                 return None
@@ -243,7 +234,7 @@ class TCPClient:
             data = self.sock.recv(4096)
             if not data:
                 self.connected = False
-                print(f"{YELLOW}Conexión cerrada por el servidor{END}")
+                print(f"{Colors.YELLOW}Conexión cerrada por el servidor{Colors.END}")
                 return None
                 
             self.buffer += data
@@ -271,11 +262,12 @@ class TCPClient:
             # No hay datos disponibles
             return []
         except Exception as e:
-            print(f"{RED}Error al recibir datos: {e}{END}")
+            print(f"{Colors.RED}Error al recibir datos: {e}{Colors.END}")
             self.connected = False
             return None
             
     def send_message(self, message):
+        """Envía un mensaje al servidor"""
         if not self.connected:
             if not self.connect():
                 return False
@@ -284,33 +276,19 @@ class TCPClient:
             self.sock.sendall(message.encode('utf-8') + b'\n')
             return True
         except Exception as e:
-            print(f"{RED}Error al enviar mensaje: {e}{END}")
+            print(f"{Colors.RED}Error al enviar mensaje: {e}{Colors.END}")
             self.connected = False
             return False
-            
-    def close(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
-                pass
-            self.sock = None
-        self.connected = False
 
-# Crear conexiones TCP
-data_client = TCPClient(host='localhost', port=5555)
-metrics_client = TCPClient(host='localhost', port=5554)
-
-# Socket para enviar resultados (actuará como servidor)
-class TCPServer:
+class TCPServer(TCPBase):
+    """Servidor TCP para enviar señales a clientes"""
     def __init__(self, host='localhost', port=5590):
-        self.host = host
-        self.port = port
-        self.sock = None
+        super().__init__(host, port)
         self.clients = []
         self.running = False
-        
+    
     def start(self):
+        """Inicia el servidor TCP"""
         try:
             self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -318,14 +296,15 @@ class TCPServer:
             self.sock.listen(5)
             self.sock.setblocking(False)
             self.running = True
-            print(f"{BRIGHT_GREEN}Servidor TCP iniciado en {self.host}:{self.port}{END}")
+            print(f"{Colors.BRIGHT_GREEN}Servidor TCP iniciado en {self.host}:{self.port}{Colors.END}")
             return True
         except Exception as e:
-            print(f"{RED}Error al iniciar servidor TCP en {self.host}:{self.port}: {e}{END}")
+            print(f"{Colors.RED}Error al iniciar servidor TCP en {self.host}:{self.port}: {e}{Colors.END}")
             self.running = False
             return False
             
     def check_new_clients(self):
+        """Verifica y acepta nuevos clientes"""
         if not self.running:
             return
             
@@ -333,14 +312,15 @@ class TCPServer:
             client, addr = self.sock.accept()
             client.setblocking(False)
             self.clients.append(client)
-            print(f"{BRIGHT_GREEN}Nuevo cliente conectado desde {addr}{END}")
+            print(f"{Colors.BRIGHT_GREEN}Nuevo cliente conectado desde {addr}{Colors.END}")
         except BlockingIOError:
             # No hay nuevas conexiones
             pass
         except Exception as e:
-            print(f"{RED}Error al aceptar cliente: {e}{END}")
+            print(f"{Colors.RED}Error al aceptar cliente: {e}{Colors.END}")
             
     def broadcast(self, message):
+        """Envía un mensaje a todos los clientes conectados"""
         if not self.running:
             return
             
@@ -360,6 +340,7 @@ class TCPServer:
             self.clients.remove(client)
             
     def close(self):
+        """Cierra el servidor y todas las conexiones de clientes"""
         self.running = False
         for client in self.clients:
             try:
@@ -375,110 +356,42 @@ class TCPServer:
                 pass
             self.sock = None
 
-# Cliente TCP para recibir resultados de operaciones
-class TCPResultsClient:
-    def __init__(self, host='localhost', port=5591):
-        self.host = host
-        self.port = port
-        self.sock = None
-        self.buffer = b''
-        self.connected = False
-        
-    def connect(self):
-        try:
-            self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.sock.connect((self.host, self.port))
-            self.sock.setblocking(False)
-            self.connected = True
-            print(f"{BRIGHT_GREEN}Conectado al servidor de resultados {self.host}:{self.port}{END}")
-            return True
-        except Exception as e:
-            print(f"{RED}Error al conectar con servidor de resultados {self.host}:{self.port}: {e}{END}")
-            self.connected = False
-            return False
-            
-    def recv_message(self):
-        if not self.connected:
-            if not self.connect():
-                return None
-        
-        try:
-            data = self.sock.recv(4096)
-            if not data:
-                self.connected = False
-                print(f"{YELLOW}Conexión cerrada por el servidor de resultados{END}")
-                return None
-                
-            self.buffer += data
-            
-            # Procesamos mensajes completos terminados en newline o ;
-            messages = []
-            while b'\n' in self.buffer or b';' in self.buffer:
-                newline_pos = self.buffer.find(b'\n')
-                semicolon_pos = self.buffer.find(b';')
-                
-                if newline_pos == -1:
-                    delimiter_pos = semicolon_pos
-                elif semicolon_pos == -1:
-                    delimiter_pos = newline_pos
-                else:
-                    delimiter_pos = min(newline_pos, semicolon_pos)
-                
-                message = self.buffer[:delimiter_pos].decode('utf-8')
-                self.buffer = self.buffer[delimiter_pos+1:]
-                messages.append(message)
-                
-            return messages
-                
-        except BlockingIOError:
-            # No hay datos disponibles
-            return []
-        except Exception as e:
-            print(f"{RED}Error al recibir datos de resultados: {e}{END}")
-            self.connected = False
-            return None
-            
-    def close(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except:
-                pass
-            self.sock = None
-        self.connected = False
+class TCPResultsClient(TCPClient):
+    """Cliente TCP específico para recibir resultados de operaciones"""
+    pass
 
-# Iniciar servidor de señales
-results_server = TCPServer(host='localhost', port=5590)
+# Inicializar variables globales
+rolling_data = pd.DataFrame()
+replay_buffer = deque(maxlen=2000)
+train_counter = 0  # Contador para el entrenamiento
+last_retrain_time = time.time()
+
+# Crear conexiones TCP
+data_client = TCPClient(host='localhost', port=Config.DATA_PORT)
+metrics_client = TCPClient(host='localhost', port=Config.METRICS_PORT)
+results_server = TCPServer(host='localhost', port=Config.SIGNALS_PORT)
+results_client = TCPResultsClient(host='localhost', port=Config.RESULTS_PORT)
+
+# Iniciar servidor y conexiones
 results_server.start()
-
-# Iniciar cliente de resultados
-results_client = TCPResultsClient(host='localhost', port=5591)
 results_client.connect()
 
-# Evitar iniciar el servidor dos veces
-server_already_started = True
 
-version = "1.1.24"  # Versión corregida con optimizaciones LSTM y CUDA
-credit = f"""{BRIGHT_RED}By HFT ALGO  - Deep Q-Network v{version}{END} {BRIGHT_MAGENTA}  Data: IN/OUT Port: 5554-55 / 5580 {END}"""
-banner = f"""{BRIGHT_MAGENTA}
+
+# Banner y créditos
+banner = f"""{Colors.BRIGHT_MAGENTA}
 ██████╗ ███████╗███████╗██████╗      ██████╗ 
 ██╔══██╗██╔════╝██╔════╝██╔══██╗    ██╔═══██╗
 ██║  ██║█████╗  █████╗  ██████╔╝    ██║   ██║
 ██║  ██║██╔══╝  ██╔══╝  ██╔═══╝     ██║▄▄ ██║
 ██████╔╝███████╗███████╗██║         ╚██████╔╝
-╚═════╝ ╚══════╝╚══════╝╚═╝          ╚══▀▀═╝ {END}"""
-print(banner)
-print(credit)
+╚═════╝ ╚══════╝╚══════╝╚═╝          ╚══▀▀═╝ {Colors.END}"""
 
-# Initialize variables for later use
-input_shape = None
-model = None
-target_model = None
-last_retrain_time = time.time()
-update_target_interval = 1
+credit = f"""{Colors.BRIGHT_RED}By HFT ALGO  - Deep Q-Network v{Config.VERSION}{Colors.END} {Colors.BRIGHT_MAGENTA}  Data: IN/OUT Port: {Config.METRICS_PORT}-{Config.DATA_PORT} / {Config.SIGNALS_PORT} {Colors.END}"""
 
-# Set up database for storing performance data
+# Configuración de la base de datos
 db_path = 'dqn_learning.db'
+update_target_interval = 1
 
 # Create extended database schema with tables for signals, operation results, and experiences
 def setup_database():
@@ -590,7 +503,8 @@ pending_experiences = {}
 reward_system = RewardSystem()
 
 def log_performance(run_id, action, reward, state, next_state, done):
-    action_int = int(action)  # Convert numpy.int64 to standard int
+    # Extraer el valor escalar del array numpy antes de convertirlo
+    action_int = int(action.item() if hasattr(action, 'item') else action)
     with sqlite3.connect(db_path) as conn:
         c = conn.cursor()
         try:
@@ -601,7 +515,8 @@ def log_performance(run_id, action, reward, state, next_state, done):
             print(f"Failed to log performance: {e}")
 
 def store_experience(state, action, reward, next_state, done):
-    action_int = int(action)  # Convert numpy.int64 to standard int
+    # Extraer el valor escalar del array numpy antes de convertirlo
+    action_int = int(action.item() if hasattr(action, 'item') else action)
     replay_buffer.append((state, action_int, reward, next_state, done))
 
 def load_replay_buffer():
@@ -617,48 +532,44 @@ def load_replay_buffer():
             done = bool(row[4])
             replay_buffer.append((state, action, reward, next_state, done))
 
-# Esta función ya no es necesaria con SB3, se mantiene solo para compatibilidad
-def train_dqn(batch_size=64, gamma=0.99):
-    print(f"{BRIGHT_YELLOW}Esta función ya no se utiliza con SB3{END}")
-    pass
+def print_welcome():
+    """Muestra el banner de bienvenida y créditos"""
+    print(banner)
+    print(credit)
+    print(f"{Colors.BRIGHT_GREEN}Iniciando DeepQ con SB3 (PPO) para trading de futuros{Colors.END}")
+    print(f"{Colors.BRIGHT_YELLOW}Conectando a NinjaTrader en puertos TCP estándar...{Colors.END}")
 
 def print_lag_window_in_minutes(lag_window_size):
+    """Calcula y muestra la ventana de tiempo en minutos"""
     seconds_per_data_point = 0.1  # Each data point is 100ms, which is 0.1 seconds
     total_seconds = lag_window_size * seconds_per_data_point
     minutes = total_seconds / 60
     rounded_minutes = round(minutes, 2)
-    print(f"{BRIGHT_YELLOW}Settings: Window size of {lag_window_size} data points is equivalent to ~{rounded_minutes} minutes.{END}")
+    print(f"{Colors.BRIGHT_YELLOW}Settings: Window size of {lag_window_size} data points is equivalent to ~{rounded_minutes} minutes.{Colors.END}")
 
-print_lag_window_in_minutes(lag_window_size)
+def configure_lag_window():
+    """Permite al usuario configurar el tamaño de la ventana de retraso"""
+    print_lag_window_in_minutes(Config.LAG_WINDOW_SIZE)
+    
+    user_decision = input(f"{Colors.BRIGHT_WHITE}Would you like to change the default lag window size? (Y/N): {Colors.END}").strip().lower()
+    if user_decision == 'y':
+        try:
+            user_input = input(f"{Colors.BRIGHT_WHITE}Enter a new lag window size (default is {Config.DEFAULT_LAG_WINDOW_SIZE}): {Colors.END}")
+            Config.LAG_WINDOW_SIZE = int(user_input)
+            if Config.LAG_WINDOW_SIZE < 1:
+                print(f"{Colors.BRIGHT_YELLOW}Invalid input. Using default value.{Colors.END}")
+                Config.LAG_WINDOW_SIZE = Config.DEFAULT_LAG_WINDOW_SIZE
+        except ValueError:
+            print(f"{Colors.BRIGHT_YELLOW}Invalid input. Using default value.{Colors.END}")
+            Config.LAG_WINDOW_SIZE = Config.DEFAULT_LAG_WINDOW_SIZE
+    else:
+        print(f"{Colors.BRIGHT_WHITE}No changes made. Using default lag window size of {Config.DEFAULT_LAG_WINDOW_SIZE}.{Colors.END}")
 
-user_decision = input(f"{BRIGHT_WHITE}Would you like to change the default lag window size? (Y/N): {END}").strip().lower()
-if user_decision == 'y':
-    try:
-        user_input = input(f"{BRIGHT_WHITE}Enter a new lag window size (default is {default_lag_window_size}): {END}")
-        lag_window_size = int(user_input)
-        if lag_window_size < 1:
-            print(f"{BRIGHT_YELLOW}Invalid input. Using default value.{END}")
-            lag_window_size = default_lag_window_size
-    except ValueError:
-        print(f"{BRIGHT_YELLOW}Invalid input. Using default value.{END}")
-        lag_window_size = default_lag_window_size
-else:
-    print(f"{BRIGHT_WHITE}No changes made. Using default lag window size of {default_lag_window_size}.{END}")
+    Config.ROLLING_WINDOW_SIZE = Config.LAG_WINDOW_SIZE + 1000
+    Config.MIN_DATA = Config.LAG_WINDOW_SIZE + 10
 
-rolling_window_size = lag_window_size + 1000
-min_data = lag_window_size + 10
-
-# Load replay buffer if database exists and contains data
-if os.path.exists(db_path):
-    load_replay_buffer()
-
-# Función para simular el comportamiento de ZMQ (ya no se usa)
-async def receive_most_recent_message(socket):
-    print(f"{YELLOW}Esta función ya no se utiliza con TCP{END}")
-    return None
-
-# Función auxiliar para crear el entorno de trading vectorizado
 def make_env(feature_dim):
+    """Función auxiliar para crear el entorno de trading vectorizado"""
     def _init():
         env = TradingEnv(feature_dim)
         return env
@@ -669,13 +580,29 @@ def generate_signal_id():
     return str(uuid.uuid4())
 
 # Función para guardar una señal emitida en la base de datos
+# Adaptador personalizado para datetime en sqlite3
+def adapt_datetime(dt):
+    """Convierte un objeto datetime a texto ISO8601 para almacenamiento en SQLite"""
+    return dt.isoformat()
+
+def convert_datetime(text):
+    """Convierte texto ISO8601 de SQLite a objeto datetime"""
+    return datetime.fromisoformat(text)
+
+# Registrar adaptadores de datetime para SQLite
+sqlite3.register_adapter(datetime, adapt_datetime)
+sqlite3.register_converter("datetime", convert_datetime)
+
 def save_signal(signal_id, action, confidence, features):
-    with sqlite3.connect(db_path) as conn:
+    with sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES) as conn:
         c = conn.cursor()
+        # Extraer el valor escalar del array numpy antes de convertirlo
+        action_value = action.item() if hasattr(action, 'item') else action
+        confidence_value = float(confidence.item() if hasattr(confidence, 'item') else confidence)
         c.execute('''
         INSERT INTO signals (signal_id, timestamp, action, confidence, features)
         VALUES (?, ?, ?, ?, ?)
-        ''', (signal_id, datetime.now(), int(action), float(confidence), str(features.tolist())))
+        ''', (signal_id, datetime.now(), int(action_value), confidence_value, str(features.tolist())))
         conn.commit()
 
 # Función para procesar los resultados de operaciones recibidos
@@ -684,11 +611,11 @@ def process_operation_result(result_message):
     Procesa un mensaje de resultado de operación.
     Formato esperado: operationId;signalId;entryTime;entryPrice;direction;exitTime;exitPrice;pnl;closeReason
     """
-    print(f"{BRIGHT_CYAN}Procesando mensaje de resultado: {result_message}{END}")
+    print(f"{Colors.BRIGHT_CYAN}Procesando mensaje de resultado: {result_message}{Colors.END}")
     
     # Primero verificamos si el mensaje tiene contenido válido
     if not result_message or len(result_message.strip()) == 0:
-        print(f"{RED}Mensaje de resultado vacío{END}")
+        print(f"{Colors.RED}Mensaje de resultado vacío{Colors.END}")
         return None
     
     # Eliminamos espacios y caracteres de control
@@ -699,10 +626,10 @@ def process_operation_result(result_message):
     
     # Verificamos que tengamos todas las partes necesarias
     if len(parts) < 9:
-        print(f"{RED}Mensaje de resultado incompleto ({len(parts)} partes): {result_message}{END}")
+        print(f"{Colors.RED}Mensaje de resultado incompleto ({len(parts)} partes): {result_message}{Colors.END}")
         # Intentamos mostrar las partes que sí tenemos para diagnóstico
         for i, part in enumerate(parts):
-            print(f"{RED}  Parte {i}: {part}{END}")
+            print(f"{Colors.RED}  Parte {i}: {part}{Colors.END}")
         return None
     
     try:
@@ -713,9 +640,9 @@ def process_operation_result(result_message):
         # Validamos que los IDs sean UUIDs
         try:
             if not all(x.isalnum() or x == '-' for x in operation_id) or not all(x.isalnum() or x == '-' for x in signal_id):
-                print(f"{YELLOW}Advertencia: IDs posiblemente no válidos: op={operation_id}, signal={signal_id}{END}")
+                print(f"{Colors.YELLOW}Advertencia: IDs posiblemente no válidos: op={operation_id}, signal={signal_id}{Colors.END}")
         except Exception as id_ex:
-            print(f"{YELLOW}Error al validar IDs: {id_ex}{END}")
+            print(f"{Colors.YELLOW}Error al validar IDs: {id_ex}{Colors.END}")
         
         # Procesamos las fechas
         try:
@@ -725,20 +652,20 @@ def process_operation_result(result_message):
             try:
                 entry_time = datetime.strptime(parts[2].strip(), '%Y-%m-%d %H:%M:%S')
             except ValueError as e:
-                print(f"{RED}Error al analizar entry_time: {parts[2]} - {e}{END}")
+                print(f"{Colors.RED}Error al analizar entry_time: {parts[2]} - {e}{Colors.END}")
                 entry_time = datetime.now()  # Valor predeterminado
         
         # Procesamos valores numéricos con manejo de errores extenso
         try:
             entry_price = float(parts[3].strip())
         except ValueError as e:
-            print(f"{RED}Error al convertir entry_price a float: {parts[3]} - {e}{END}")
+            print(f"{Colors.RED}Error al convertir entry_price a float: {parts[3]} - {e}{Colors.END}")
             entry_price = 0.0
         
         try:
             direction = int(parts[4].strip())
         except ValueError as e:
-            print(f"{RED}Error al convertir direction a int: {parts[4]} - {e}{END}")
+            print(f"{Colors.RED}Error al convertir direction a int: {parts[4]} - {e}{Colors.END}")
             direction = 0
         
         try:
@@ -747,29 +674,29 @@ def process_operation_result(result_message):
             try:
                 exit_time = datetime.strptime(parts[5].strip(), '%Y-%m-%d %H:%M:%S')
             except ValueError as e:
-                print(f"{RED}Error al analizar exit_time: {parts[5]} - {e}{END}")
+                print(f"{Colors.RED}Error al analizar exit_time: {parts[5]} - {e}{Colors.END}")
                 exit_time = datetime.now()
         
         try:
             exit_price = float(parts[6].strip())
         except ValueError as e:
-            print(f"{RED}Error al convertir exit_price a float: {parts[6]} - {e}{END}")
+            print(f"{Colors.RED}Error al convertir exit_price a float: {parts[6]} - {e}{Colors.END}")
             exit_price = 0.0
         
         try:
             pnl = float(parts[7].strip())
         except ValueError as e:
-            print(f"{RED}Error al convertir pnl a float: {parts[7]} - {e}{END}")
+            print(f"{Colors.RED}Error al convertir pnl a float: {parts[7]} - {e}{Colors.END}")
             pnl = 0.0
         
         close_reason = parts[8].strip()
         
         # Mostramos información detallada sobre el resultado procesado
-        print(f"{BRIGHT_GREEN}Resultado de operación procesado correctamente:{END}")
-        print(f"{BRIGHT_GREEN}  OperationID: {operation_id}{END}")
-        print(f"{BRIGHT_GREEN}  SignalID: {signal_id}{END}")
-        print(f"{BRIGHT_GREEN}  PnL: {pnl}{END}")
-        print(f"{BRIGHT_GREEN}  Razón de cierre: {close_reason}{END}")
+        print(f"{Colors.BRIGHT_GREEN}Resultado de operación procesado correctamente:{Colors.END}")
+        print(f"{Colors.BRIGHT_GREEN}  OperationID: {operation_id}{Colors.END}")
+        print(f"{Colors.BRIGHT_GREEN}  SignalID: {signal_id}{Colors.END}")
+        print(f"{Colors.BRIGHT_GREEN}  PnL: {pnl}{Colors.END}")
+        print(f"{Colors.BRIGHT_GREEN}  Razón de cierre: {close_reason}{Colors.END}")
         
         # Guardar el resultado en la base de datos
         with sqlite3.connect(db_path) as conn:
@@ -789,7 +716,7 @@ def process_operation_result(result_message):
         }
     except Exception as e:
         import traceback
-        print(f"{RED}Error al procesar resultado de operación: {e}{END}")
+        print(f"{Colors.RED}Error al procesar resultado de operación: {e}{Colors.END}")
         traceback.print_exc()
         return None
 
@@ -804,7 +731,6 @@ def update_pending_experience(signal_id, pnl):
         real_reward = reward_system.calculate_real_reward(pnl)
         
         # Almacenar la experiencia con la recompensa real
-        # Nota: Ahora experience['state'] y experience['next_state'] son secuencias LSTM completas
         combined_reward = reward_system.store_experience(
             signal_id, 
             experience['action'], 
@@ -815,7 +741,7 @@ def update_pending_experience(signal_id, pnl):
             experience['done']
         )
         
-        print(f"{BRIGHT_CYAN}Experiencia actualizada - SignalId: {signal_id}, Simulada: {experience['simulated_reward']:.2f}, Real: {real_reward:.2f}, Combinada: {combined_reward:.2f}, PnL: {pnl}{END}")
+        print(f"{Colors.BRIGHT_CYAN}Experiencia actualizada - SignalId: {signal_id}, Simulada: {experience['simulated_reward']:.2f}, Real: {real_reward:.2f}, Combinada: {combined_reward:.2f}, PnL: {pnl}{Colors.END}")
         
         # Reducir el factor alpha para dar más peso a las recompensas reales
         reward_system.decay_alpha()
@@ -839,7 +765,15 @@ async def receive_and_process_data():
     
     # Intentar conectar con los servidores
     data_client.connect()
-    metrics_client.connect()
+    
+    # Manejo robusto para métricas (no crítico)
+    try:
+        metrics_connected = metrics_client.connect()
+        if not metrics_connected:
+            print(f"{Colors.YELLOW}Servidor de métricas no disponible (puerto {Config.METRICS_PORT}). Continuando sin métricas.{Colors.END}")
+    except Exception as e:
+        print(f"{Colors.YELLOW}Error al conectar con servidor de métricas: {e} - Continuando sin métricas.{Colors.END}")
+    
     results_client.connect()
 
     while True:
@@ -857,9 +791,9 @@ async def receive_and_process_data():
                     
                     # Actualizar experiencias pendientes con resultados reales
                     if update_pending_experience(signal_id, pnl):
-                        print(f"{BRIGHT_GREEN}Retroalimentación aplicada para SignalId: {signal_id}, PnL: {pnl}{END}")
+                        print(f"{Colors.BRIGHT_GREEN}Retroalimentación aplicada para SignalId: {signal_id}, PnL: {pnl}{Colors.END}")
                     else:
-                        print(f"{YELLOW}No se encontró experiencia pendiente para SignalId: {signal_id}{END}")
+                        print(f"{Colors.YELLOW}No se encontró experiencia pendiente para SignalId: {signal_id}{Colors.END}")
         
         # Intentar recibir datos
         messages = data_client.recv_message()
@@ -875,7 +809,7 @@ async def receive_and_process_data():
 
         # Verificar que los datos sean válidos
         if not parsed_data or len(parsed_data) == 0:
-            print(f"{YELLOW}Datos recibidos inválidos: {data}{END}")
+            print(f"{Colors.YELLOW}Datos recibidos inválidos: {data}{Colors.END}")
             await asyncio.sleep(0.1)
             continue
 
@@ -889,7 +823,7 @@ async def receive_and_process_data():
                 else:
                     columns.append(f'feature_{i}')
             rolling_data = pd.DataFrame(columns=columns)
-            print(f"{BRIGHT_BLUE}DataFrame inicializado con {len(columns)} columnas{END}")
+            print(f"{Colors.BRIGHT_BLUE}DataFrame inicializado con {len(columns)} columnas{Colors.END}")
 
         try:
             # Convertir los datos a valores numéricos
@@ -899,7 +833,6 @@ async def receive_and_process_data():
                 if x:  # Verificar que no esté vacío
                     try:
                         # Limpiar el valor para asegurar que sea un número válido
-                        # Eliminar cualquier carácter no numérico excepto punto y signo negativo
                         clean_x = ''.join(c for c in x if c.isdigit() or c == '.' or c == '-')
                         # Si hay múltiples puntos, quedarse solo con el primero
                         if clean_x.count('.') > 1:
@@ -907,7 +840,7 @@ async def receive_and_process_data():
                             clean_x = clean_x[:first_dot+1] + clean_x[first_dot+1:].replace('.', '')
                         features.append(float(clean_x))
                     except ValueError:
-                        print(f"{YELLOW}Valor no convertible a float, usando 0.0: '{x}'{END}")
+                        print(f"{Colors.YELLOW}Valor no convertible a float, usando 0.0: '{x}'{Colors.END}")
                         features.append(0.0)
                 else:
                     features.append(0.0)  # Valor por defecto para campos vacíos
@@ -917,38 +850,38 @@ async def receive_and_process_data():
             rolling_data = pd.concat([rolling_data, new_row], ignore_index=True)
             
             # Mantener el tamaño del DataFrame dentro de los límites
-            if len(rolling_data) > rolling_window_size:
-                rolling_data = rolling_data.iloc[-rolling_window_size:]
+            if len(rolling_data) > Config.ROLLING_WINDOW_SIZE:
+                rolling_data = rolling_data.iloc[-Config.ROLLING_WINDOW_SIZE:]
             
             # Imprimir información sobre los datos recibidos (solo ocasionalmente)
             if loop_counter % 100 == 0:
-                print(f"{BRIGHT_CYAN}Datos recibidos: {features[:3]}...{END}")
+                print(f"{Colors.BRIGHT_CYAN}Datos recibidos: {features[:3]}...{Colors.END}")
                 
         except Exception as e:
-            print(f"{RED}Error al procesar datos: {e}{END}")
+            print(f"{Colors.RED}Error al procesar datos: {e}{Colors.END}")
             continue
             
         # Verificar si tenemos suficientes datos para entrenar
-        if len(rolling_data) < min_data:
+        if len(rolling_data) < Config.MIN_DATA:
             loop_counter += 1
             if loop_counter % 1 == 0:
-                print(f"{BRIGHT_GREEN}Waiting For Data Frame Min {len(rolling_data)} of {min_data}{END}", end='\r')
+                print(f"{Colors.BRIGHT_GREEN}Waiting For Data Frame Min {len(rolling_data)} of {Config.MIN_DATA}{Colors.END}", end='\r')
             continue
             
         # Crear datos desplazados para predecir el precio futuro
-        lagged_data = rolling_data.shift(lag_window_size).dropna()
+        lagged_data = rolling_data.shift(Config.LAG_WINDOW_SIZE).dropna()
         
         if lagged_data.empty:
-            print(f"{CYAN}Esperando más datos para acumular.{END}")
+            print(f"{Colors.CYAN}Esperando más datos para acumular.{Colors.END}")
             continue
             
         # Preparar datos para el entrenamiento
         if len(lagged_data.columns) > 1 and 'price' in lagged_data.columns:
             X = lagged_data.drop('price', axis=1).values
-            y = rolling_data['price'].iloc[lag_window_size:].values
+            y = rolling_data['price'].iloc[Config.LAG_WINDOW_SIZE:].values
         else:
             X = lagged_data.values
-            y = rolling_data.iloc[lag_window_size:].values
+            y = rolling_data.iloc[Config.LAG_WINDOW_SIZE:].values
             
         # Verificar si es momento de reentrenar el modelo
         if len(X) >= 10 and X.shape[1] > 0 and (time.time() - last_retrain_time >= update_target_interval):
@@ -958,44 +891,47 @@ async def receive_and_process_data():
             # Inicializar el modelo si no existe
             if not training_started:
                 feature_dimension = latest_features.shape[0]
-                sequence_length = 10  # Longitud de secuencia para LSTM
-                print(f"{BRIGHT_BLUE}Inicializando entorno con LSTM - dimensión: {feature_dimension}, secuencia: {sequence_length}{END}")
+                print(f"{Colors.BRIGHT_BLUE}Inicializando entorno simple - dimensión: {feature_dimension}{Colors.END}")
                 
-                # Configuración para entorno optimizado para LSTM
-                def make_env_lstm(feature_dim):
+                # Configuración para entorno básico (sin LSTM)
+                def make_simple_env(feature_dim):
                     def _init():
-                        # Usar sequence_length para LSTM
-                        env = TradingEnv(feature_dim, sequence_length=sequence_length)
+                        # Crear entorno simple
+                        env = TradingEnv(feature_dim)
                         # Envolver con Monitor para seguimiento
                         return Monitor(env, os.path.join("./logs", f"trading_env_{time.time()}"))
                     return _init
                 
                 # Crear entorno vectorizado
-                vec_env = DummyVecEnv([make_env_lstm(feature_dimension)])
-                # Apilar frames para secuencias LSTM
-                vec_env = VecFrameStack(vec_env, n_stack=sequence_length)
+                vec_env = DummyVecEnv([make_simple_env(feature_dimension)])
                 
                 # Configuración de Tensorboard para monitoreo
                 tensorboard_log = "./tensorboard_logs/"
                 os.makedirs(tensorboard_log, exist_ok=True)
                 
-                # Inicializar modelo PPO con política LSTM y activar CUDA
-                device = "cuda" if CUDA_AVAILABLE else "cpu"
-                print(f"{BRIGHT_GREEN}Usando dispositivo: {device} para entrenamiento{END}")
+                # Crear modelo PPO con configuración simple
+                device = "cpu"  # Forzar uso de CPU para mayor estabilidad
+                print(f"{Colors.BRIGHT_GREEN}Usando dispositivo: {device} para entrenamiento con MlpPolicy{Colors.END}")
                 
+                # Crear el modelo con MlpPolicy estándar
                 model = PPO(
-                    "MlpLstmPolicy",  # Política híbrida MLP+LSTM para trading
+                    "MlpPolicy",
                     vec_env, 
-                    verbose=1,  # Mostrar más información de entrenamiento
-                    learning_rate=0.0005,  # Tasa de aprendizaje optimizada para LSTM
-                    n_steps=512,  # Reducido para permitir actualizaciones más frecuentes
-                    batch_size=128,  # Aumentado para mejor paralelización en GPU
+                    verbose=1,
+                    learning_rate=0.0003,
+                    n_steps=128,
+                    batch_size=64,
                     gamma=0.99,
-                    ent_coef=0.01,  # Reducido para menos exploración aleatoria con LSTM
+                    ent_coef=0.01,
                     clip_range=0.2,
-                    n_epochs=4,  # Aumentado para entrenar más por batch
-                    device=device,  # Usar CUDA si está disponible
-                    tensorboard_log=tensorboard_log
+                    n_epochs=4,
+                    device=device,
+                    tensorboard_log=tensorboard_log,
+                    # Parámetros de red más simples
+                    policy_kwargs=dict(
+                        net_arch=[64, 64],
+                        activation_fn=torch.nn.Tanh
+                    )
                 )
                 
                 # Configurar callbacks para checkpoint y monitoreo
@@ -1010,11 +946,11 @@ async def receive_and_process_data():
                 )
                 
                 # Inicializar entorno para inferencia
-                env = TradingEnv(feature_dimension, sequence_length=sequence_length)
+                env = TradingEnv(feature_dimension)
                 env.reset(initial_state=latest_features)
                 
                 training_started = True
-                print(f"{BRIGHT_GREEN}Modelo PPO con LSTM inicializado correctamente para CUDA{END}")
+                print(f"{Colors.BRIGHT_GREEN}Modelo PPO inicializado correctamente con CPU{Colors.END}")
             
             # Actualizar el estado con los nuevos datos
             current_price = rolling_data['price'].iloc[-2]
@@ -1023,8 +959,8 @@ async def receive_and_process_data():
             # Generar ID único para la señal
             signal_id = generate_signal_id()
             
-            # Obtener la secuencia actual para la predicción LSTM
-            current_sequence = np.array(env.state_buffer, dtype=np.float32)
+            # Obtener el estado actual para la predicción
+            current_state = env.current_state.reshape(1, -1)  # Asegurar formato (1, feature_dim) para predicción
             
             # Implementar mecanismo de forzado de exploración periódica
             # Ocasionalmente forzar una acción diferente a la que el modelo sugeriría
@@ -1032,19 +968,19 @@ async def receive_and_process_data():
                 # Seleccionar una acción aleatoria (todas tienen igual probabilidad)
                 forced_action = random.randint(0, 2)
                 action = forced_action
-                print(f"{BRIGHT_MAGENTA}Forzando exploración - acción aleatoria: {action}{END}")
+                print(f"{Colors.BRIGHT_MAGENTA}Forzando exploración - acción aleatoria: {action}{Colors.END}")
             else:
-                # Predecir acción usando el modelo PPO con la secuencia correcta para LSTM
-                action, _ = model.predict(current_sequence, deterministic=False)
+                # Predecir acción usando el modelo PPO con el estado simple
+                action, _ = model.predict(current_state, deterministic=False)
             
             # Mostrar la acción predicha
             print('')
             if action == 0:
-                print(f"{BRIGHT_YELLOW}Recommended trading action: Stay out (Hold){END}")
+                print(f"{Colors.BRIGHT_YELLOW}Recommended trading action: Stay out (Hold){Colors.END}")
             elif action == 1:
-                print(f"{BRIGHT_GREEN}Recommended trading action: Go long (Buy){END}")
+                print(f"{Colors.BRIGHT_GREEN}Recommended trading action: Go long (Buy){Colors.END}")
             else:  # action == 2
-                print(f"{BRIGHT_RED}Recommended trading action: Go short (Sell){END}")
+                print(f"{Colors.BRIGHT_RED}Recommended trading action: Go short (Sell){Colors.END}")
             
             # Ejecutar paso en el entorno para calcular recompensa simulada
             if previous_price is not None:
@@ -1057,51 +993,59 @@ async def receive_and_process_data():
                 save_signal(signal_id, action, confidence, latest_features)
                 
                 # Almacenar como experiencia pendiente para actualizar con recompensa real
-                # Usar la secuencia completa para LSTM en lugar de solo latest_features
                 pending_experiences[signal_id] = {
                     'action': action,
                     'simulated_reward': simulated_reward,
-                    'state': current_sequence,
-                    'next_state': current_sequence, # Para simplicidad usamos la misma secuencia como estado siguiente
+                    'state': env.current_state,
+                    'next_state': env.current_state, # Para simplicidad usamos el mismo estado como estado siguiente
                     'done': int(done)
                 }
                 
-                # Registrar la experiencia para compatibilidad (mantenemos el formato anterior para compatibilidad)
+                # Registrar la experiencia para compatibilidad
                 log_performance(loop_counter, action, simulated_reward, np.array([latest_features]), np.array([latest_features]), int(done))
                 
                 # Mostrar información sobre la operación
-                print(f"{BRIGHT_CYAN}Signal ID: {signal_id} | Simulated Reward: {simulated_reward} | Cumulative: {info['cumulative_reward']} | Confidence: {confidence:.4f}{END}")
+                print(f"{Colors.BRIGHT_CYAN}Signal ID: {signal_id} | Simulated Reward: {simulated_reward} | Cumulative: {info['cumulative_reward']} | Confidence: {confidence:.4f}{Colors.END}")
                 
                 # Incrementar contador de entrenamiento
                 train_counter += 1
                 
                 # Entrenar el modelo periódicamente
-                if train_counter >= retrain_interval:
-                    print(f"{BRIGHT_BLUE}Entrenando modelo PPO (iteración {train_counter}){END}")
-                    # Entrenar por 50 timesteps (aumentado de 10 a 50 para un aprendizaje más profundo)
-                    # Usar callback para guardar checkpoints periódicos
+                if train_counter >= Config.RETRAIN_INTERVAL:
+                    print(f"{Colors.BRIGHT_BLUE}Entrenando modelo PPO (iteración {train_counter}){Colors.END}")
+                    # Entrenar por 50 timesteps
                     model.learn(total_timesteps=50, callback=checkpoint_callback)
                     train_counter = 0
                 
                 # Enviar acción al socket con ID, confianza y timestamp
                 # El formato debe ser: SignalId;Action;Confidence;Timestamp
-                print(f"{BRIGHT_GREEN}Enviando señal: ID={signal_id}, Acción={action}, Confianza={confidence:.4f}{END}")
-                results_server.broadcast(f"{signal_id};{float(action)};{confidence:.4f};{time.time()}")
+                print(f"{Colors.BRIGHT_GREEN}Enviando señal: ID={signal_id}, Acción={action}, Confianza={confidence:.4f}{Colors.END}")
+                # Extraer valores escalares para evitar advertencias
+                action_value = action.item() if hasattr(action, 'item') else action
+                results_server.broadcast(f"{signal_id};{float(action_value)};{confidence:.4f};{time.time()}")
             
             previous_price = current_price
             last_retrain_time = time.time()
 
 async def main():
     try:
-        # Imprimir mensaje de inicio
-        print(f"{BRIGHT_GREEN}Iniciando DeepQ con SB3 (PPO) para trading de futuros{END}")
-        print(f"{BRIGHT_YELLOW}Conectando a NinjaTrader en puertos TCP estándar...{END}")
+        # Imprimir mensaje de bienvenida
+        print_welcome()
+        
+        # Configurar ventana de retraso
+        configure_lag_window()
+        
+        # Cargar buffer de replay si existe la base de datos
+        if os.path.exists(db_path):
+            print(f"{Colors.BRIGHT_BLUE}Cargando experiencias previas desde la base de datos...{Colors.END}")
+            load_replay_buffer()
+            print(f"{Colors.BRIGHT_BLUE}Cargadas {len(replay_buffer)} experiencias.{Colors.END}")
         
         # Ejecutar bucle principal
         await receive_and_process_data()
     except Exception as e:
         import traceback
-        print(f"{RED}Un error ha ocurrido: {e}{END}")
+        print(f"{Colors.RED}Un error ha ocurrido: {e}{Colors.END}")
         traceback.print_exc()
     finally:
         # Cerrar conexiones
@@ -1109,16 +1053,16 @@ async def main():
         metrics_client.close()
         results_client.close()
         results_server.close()
-        print(f"{BRIGHT_RED}Conexiones cerradas{END}")
+        print(f"{Colors.BRIGHT_RED}Conexiones cerradas{Colors.END}")
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print(f"{BRIGHT_YELLOW}Programa interrumpido por el usuario{END}")
+        print(f"{Colors.BRIGHT_YELLOW}Programa interrumpido por el usuario{Colors.END}")
     except Exception as e:
         import traceback
-        print(f"{RED}Un error ha ocurrido: {e}{END}")
+        print(f"{Colors.RED}Un error ha ocurrido: {e}{Colors.END}")
         traceback.print_exc()
     finally:
-        input(f"{BRIGHT_WHITE}Presiona Enter para cerrar la consola...{END}")
+        input(f"{Colors.BRIGHT_WHITE}Presiona Enter para cerrar la consola...{Colors.END}")
