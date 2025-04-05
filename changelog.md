@@ -1,5 +1,13 @@
 # Changelog
-[2025-04-04 19:47:00]
+[2025-04-04 21:08:00]
+
+## [1.1.22] - 2025-04-04 21:08:00
+
+### Añadido
+- Creado archivo README.md con documentación completa del sistema, incluyendo diagramas explicativos, instrucciones de instalación y configuración
+- Creado archivo requirements.txt con todas las dependencias necesarias para el proyecto
+- Mejorada la documentación general del sistema para facilitar su comprensión y uso
+
 
 ## [1.1.21] - 2025-04-04 19:47:00
 

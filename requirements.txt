@@ -1,0 +1,13 @@
+# Dependencias principales
+pandas>=1.3.0
+numpy>=1.20.0
+gymnasium>=0.27.0
+stable-baselines3>=2.0.0
+scikit-learn>=1.0.0
+
+# Dependencias para visualización (opcionales pero recomendadas)
+matplotlib>=3.4.0
+seaborn>=0.11.0
+
+# Dependencias para comunicación de red
+asyncio>=3.4.3  # Incluido en la biblioteca estándar de Python
